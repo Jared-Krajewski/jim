@@ -127,20 +127,25 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
 
-  function scheduleNotification(seconds: number) {
-    if (seconds <= 0) return;
+  function scheduleNotification(endTimeMs: number) {
+    const msFromNow = endTimeMs - Date.now();
+    if (msFromNow <= 0) return;
     Notifications.scheduleNotificationAsync({
+      identifier: "rest-timer",
       content: {
         title: "Rest Timer",
         body: "Rest complete",
-        sound: true,
-        // interruptionLevel is iOS 15+ and breaks through Focus modes without
-        // bypassing the mute switch (that requires a Critical Alerts entitlement)
+        // Same WAV used for in-app playback — plays on lock screen when the
+        // mute switch is off, silent otherwise (no Critical Alerts needed).
+        sound: "412017__skymary__cat-meow-short.wav",
+        // timeSensitive breaks through Focus modes without Critical Alerts
         interruptionLevel: "timeSensitive" as "timeSensitive",
       },
       trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-        seconds: Math.max(1, Math.round(seconds)),
+        // DATE trigger fires at the exact end timestamp rather than a rounded
+        // interval, keeping the lock-screen alert in sync with the countdown.
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: new Date(endTimeMs),
       },
     }).catch(() => {});
   }
@@ -193,7 +198,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
           isRunningRef.current = true;
           // Reschedule notification in case end-time changed (e.g. after Reset)
           Notifications.cancelAllScheduledNotificationsAsync()
-            .then(() => scheduleNotification(diff))
+            .then(() => scheduleNotification(actState.endTimeMs))
             .catch(() => {});
           if (!intervalRef.current) {
             startInterval();
@@ -287,7 +292,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
 
     // Schedule local notification as a fallback for when the app is suspended
     Notifications.cancelAllScheduledNotificationsAsync()
-      .then(() => scheduleNotification(total))
+      .then(() => scheduleNotification(end))
       .catch(() => {});
 
     startInterval();

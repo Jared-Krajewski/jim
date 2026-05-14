@@ -17,10 +17,7 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.jaredkrajewski.jim",
       "appleTeamId": "UQ6CB8CM9T",
-      "buildNumber": "5",
-      "infoPlist": {
-        "UIBackgroundModes": ["audio"]
-      }
+      "buildNumber": "7"
     },
     "android": {
       "adaptiveIcon": {
@@ -35,7 +32,6 @@
       "expo-sqlite",
       "@bacons/apple-targets",
       "./plugins/withLiveTimerModule",
-      "expo-audio",
       [
         "expo-notifications",
         {
