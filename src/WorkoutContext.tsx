@@ -1,4 +1,4 @@
-import { getInProgressSession } from "@/src/db/database";
+import { completeSession, getInProgressSession } from "@/src/db/database";
 import React, { createContext, useContext, useEffect, useState } from "react";
 
 export type ActiveWorkout = {
@@ -37,14 +37,23 @@ export function WorkoutProvider({ children }: { children: React.ReactNode }) {
 
   // On app launch, restore any incomplete session from SQLite so the
   // In Progress banner appears even after a force-quit / restart.
+  // Sessions older than 2.5 hours are auto-completed to avoid stale data.
   useEffect(() => {
     getInProgressSession()
-      .then((session) => {
+      .then(async (session) => {
         if (session) {
-          setActiveWorkoutState({
-            sessionId: session.id,
-            sessionName: session.name,
-          });
+          const elapsedMs = Date.now() - session.started_at * 1000;
+          const maxMs = 2.5 * 60 * 60 * 1000; // 2.5 hours
+          if (elapsedMs >= maxMs) {
+            // Set completed_at to started_at + 2.5 hours (in seconds)
+            const completedAt = session.started_at + Math.floor(2.5 * 60 * 60);
+            await completeSession(session.id, completedAt);
+          } else {
+            setActiveWorkoutState({
+              sessionId: session.id,
+              sessionName: session.name,
+            });
+          }
         }
       })
       .catch(() => {});

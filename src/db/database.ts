@@ -627,12 +627,19 @@ export async function createSession(
   return result.lastInsertRowId;
 }
 
-export async function completeSession(id: number): Promise<void> {
+export async function completeSession(id: number, completedAt?: number): Promise<void> {
   const database = await getDatabase();
-  await database.runAsync(
-    "UPDATE workout_sessions SET completed_at = strftime('%s', 'now') WHERE id = ?",
-    [id],
-  );
+  if (completedAt !== undefined) {
+    await database.runAsync(
+      "UPDATE workout_sessions SET completed_at = ? WHERE id = ?",
+      [completedAt, id],
+    );
+  } else {
+    await database.runAsync(
+      "UPDATE workout_sessions SET completed_at = strftime('%s', 'now') WHERE id = ?",
+      [id],
+    );
+  }
 }
 
 export async function deleteSession(id: number): Promise<void> {
@@ -757,6 +764,28 @@ export async function getWorkoutCalendarDates(
   );
 }
 
+export type SessionDuration = {
+  date: string;
+  session_name: string;
+  duration_minutes: number;
+};
+
+/** Duration in minutes for every completed session, ordered oldest→newest */
+export async function getSessionDurations(): Promise<SessionDuration[]> {
+  const database = await getDatabase();
+  return database.getAllAsync<SessionDuration>(
+    `SELECT
+       date,
+       name as session_name,
+       ROUND((completed_at - started_at) / 60.0, 1) as duration_minutes
+     FROM workout_sessions
+     WHERE completed_at IS NOT NULL
+       AND started_at IS NOT NULL
+       AND (completed_at - started_at) > 0
+     ORDER BY date ASC, started_at ASC`,
+  );
+}
+
 export type MuscleGroupVolume = { muscle_group: string; total_volume: number };
 
 /** All-time total volume per muscle group (for body heatmap on Overall tab) */
@@ -802,6 +831,64 @@ export async function reorderTemplateExercises(
       );
     }
   });
+}
+
+/** Returns only exercises that have at least one completed session set */
+export async function getExercisesWithData(): Promise<Exercise[]> {
+  const database = await getDatabase();
+  return database.getAllAsync<Exercise>(
+    `SELECT DISTINCT e.* FROM exercises e
+     JOIN session_sets ss ON ss.exercise_id = e.id
+     JOIN workout_sessions ws ON ws.id = ss.session_id
+     WHERE ws.completed_at IS NOT NULL
+     ORDER BY e.name ASC`,
+  );
+}
+
+/** Creates a workout template that mirrors a completed session's exercises/sets */
+export async function createTemplateFromSession(
+  sessionId: number,
+): Promise<number> {
+  const database = await getDatabase();
+  // Create an empty template (user will fill in the name on the edit screen)
+  const result = await database.runAsync(
+    "INSERT INTO workout_templates (name, notes) VALUES (?, ?)",
+    ["", ""],
+  );
+  const templateId = result.lastInsertRowId;
+
+  // Get distinct exercises in order of first appearance
+  const exercises = await database.getAllAsync<{ exercise_id: number }>(
+    `SELECT exercise_id FROM session_sets
+     WHERE session_id = ?
+     GROUP BY exercise_id
+     ORDER BY MIN(id) ASC`,
+    [sessionId],
+  );
+
+  for (let i = 0; i < exercises.length; i++) {
+    const eid = exercises[i].exercise_id;
+    const sets = await database.getAllAsync<{ reps: number; weight: number }>(
+      `SELECT reps, weight FROM session_sets
+       WHERE session_id = ? AND exercise_id = ?
+       ORDER BY set_number ASC`,
+      [sessionId, eid],
+    );
+
+    const setCount = sets.length;
+    const lastSet = sets[sets.length - 1];
+    const defaultReps = lastSet?.reps ?? 10;
+    const defaultWeight = lastSet?.weight ?? 0;
+
+    await database.runAsync(
+      `INSERT INTO template_exercises
+         (template_id, exercise_id, default_sets, default_reps, default_weight, default_unit, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [templateId, eid, setCount, defaultReps, defaultWeight, "lbs", i],
+    );
+  }
+
+  return templateId;
 }
 
 /** Persist a new sort order for templates (orderedIds[0] = first in list) */
@@ -859,38 +946,55 @@ export async function exportAllData(): Promise<ExportPayload> {
 export async function importAllData(payload: ExportPayload): Promise<void> {
   const database = await getDatabase();
   await database.withTransactionAsync(async () => {
-    // Clear existing data
+    // Step 1: Build a mapping from payload exercise IDs → DB exercise IDs.
+    // Exercises that exactly match an existing entry (name + muscle_group) are
+    // reused so seeded exercises are never deleted or duplicated.
+    const exerciseIdMap = new Map<number, number>();
+    for (const e of payload.exercises) {
+      const existing = await database.getFirstAsync<{ id: number }>(
+        "SELECT id FROM exercises WHERE name = ? AND muscle_group = ?",
+        [e.name, e.muscle_group],
+      );
+      if (existing) {
+        exerciseIdMap.set(e.id, existing.id);
+      } else {
+        const result = await database.runAsync(
+          `INSERT INTO exercises
+             (name, muscle_group, notes, default_weight, default_unit, default_reps, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            e.name,
+            e.muscle_group,
+            e.notes,
+            e.default_weight ?? 0,
+            e.default_unit ?? "lbs",
+            e.default_reps ?? 10,
+            e.created_at,
+          ],
+        );
+        exerciseIdMap.set(e.id, result.lastInsertRowId);
+      }
+    }
+
+    // Step 2: Clear only user-generated data — exercises are intentionally kept.
     await database.execAsync(`
       DELETE FROM session_sets;
       DELETE FROM workout_sessions;
       DELETE FROM template_exercises;
       DELETE FROM workout_templates;
-      DELETE FROM exercises;
     `);
-    for (const e of payload.exercises) {
-      await database.runAsync(
-        `INSERT OR REPLACE INTO exercises
-           (id, name, muscle_group, notes, default_weight, default_unit, default_reps, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          e.id,
-          e.name,
-          e.muscle_group,
-          e.notes,
-          e.default_weight ?? 0,
-          e.default_unit ?? "lbs",
-          e.default_reps ?? 10,
-          e.created_at,
-        ],
-      );
-    }
+
+    // Step 3: Restore templates.
     for (const t of payload.templates) {
       await database.runAsync(
         `INSERT OR REPLACE INTO workout_templates (id, name, notes, created_at) VALUES (?, ?, ?, ?)`,
         [t.id, t.name, t.notes, t.created_at],
       );
     }
+
+    // Step 4: Restore template_exercises, remapping exercise IDs.
     for (const te of payload.template_exercises) {
+      const mappedExerciseId = exerciseIdMap.get(te.exercise_id) ?? te.exercise_id;
       await database.runAsync(
         `INSERT OR REPLACE INTO template_exercises
            (id, template_id, exercise_id, default_sets, default_reps, default_weight, default_unit, sort_order)
@@ -898,7 +1002,7 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
         [
           te.id,
           te.template_id,
-          te.exercise_id,
+          mappedExerciseId,
           te.default_sets,
           te.default_reps,
           te.default_weight ?? 0,
@@ -907,6 +1011,8 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
         ],
       );
     }
+
+    // Step 5: Restore sessions.
     for (const s of payload.sessions) {
       await database.runAsync(
         `INSERT OR REPLACE INTO workout_sessions
@@ -923,7 +1029,10 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
         ],
       );
     }
+
+    // Step 6: Restore session sets, remapping exercise IDs.
     for (const ss of payload.session_sets) {
+      const mappedExerciseId = exerciseIdMap.get(ss.exercise_id) ?? ss.exercise_id;
       await database.runAsync(
         `INSERT OR REPLACE INTO session_sets
            (id, session_id, exercise_id, set_number, reps, weight, completed)
@@ -931,7 +1040,7 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
         [
           ss.id,
           ss.session_id,
-          ss.exercise_id,
+          mappedExerciseId,
           ss.set_number,
           ss.reps,
           ss.weight,

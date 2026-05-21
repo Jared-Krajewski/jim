@@ -84,7 +84,19 @@ export default function MuscleHeatmap({ muscleVolumes }: Props) {
     }));
   }, [muscleVolumes]);
 
-  if (!bodyData.length) return null;
+  if (!bodyData.length) {
+    // Render the body silhouette with no highlights for consistency
+    const emptyFill = isDark ? "#2a2a2a" : "#e8e8e8";
+    const emptyBorder = isDark ? "#3a3a3a" : "#d0d0d0";
+    return (
+      <View style={styles.container}>
+        <View style={styles.bodies}>
+          <Body data={[]} side="front" gender="male" scale={0.95} colors={HEATMAP_COLORS} defaultFill={emptyFill} border={emptyBorder} />
+          <Body data={[]} side="back" gender="male" scale={0.95} colors={HEATMAP_COLORS} defaultFill={emptyFill} border={emptyBorder} />
+        </View>
+      </View>
+    );
+  }
 
   const defaultFill = isDark ? "#2a2a2a" : "#e8e8e8";
   const border = isDark ? "#3a3a3a" : "#d0d0d0";

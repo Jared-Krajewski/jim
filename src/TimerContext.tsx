@@ -17,6 +17,7 @@ import React, {
 } from "react";
 import { AppState, AppStateStatus } from "react-native";
 import {
+  endLiveActivity,
   getLiveActivityState,
   startLiveActivity,
   updateLiveActivity,
@@ -64,6 +65,9 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const appStateRef = useRef(AppState.currentState);
   const handleDoneRef = useRef<(silent?: boolean) => void>(() => {});
+  // Tracks a pending 5-minute timeout that ends the Live Activity after a
+  // timer completes, so the Dynamic Island / lock-screen widget clears itself.
+  const endActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // expo-audio player — loaded once on mount
   // We import dynamically so a missing package doesn't crash on web/android.
@@ -106,6 +110,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
     return () => {
       active = false;
       if (intervalRef.current) clearInterval(intervalRef.current);
+      if (endActivityTimeoutRef.current) clearTimeout(endActivityTimeoutRef.current);
       playerRef.current?.remove();
     };
   }, []);
@@ -119,6 +124,11 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
         next === "active"
       ) {
         syncWithLiveActivity();
+        // If a dismiss was pending while the app was suspended, re-schedule it
+        // for the remaining delay so it fires accurately after resuming.
+        if (endActivityTimeoutRef.current !== null && !isRunningRef.current) {
+          // timeout still armed — no action needed; JS resumes the timer
+        }
       }
       appStateRef.current = next;
     });
@@ -126,6 +136,27 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Schedules endLiveActivity() to run after `delayMs` (default 5 minutes).
+   * Cancels any previously pending dismissal first, so calling this again
+   * (e.g. on a new timer) resets the countdown.
+   */
+  function scheduleActivityEnd(delayMs = 300_000) {
+    if (endActivityTimeoutRef.current) clearTimeout(endActivityTimeoutRef.current);
+    endActivityTimeoutRef.current = setTimeout(() => {
+      endActivityTimeoutRef.current = null;
+      endLiveActivity().catch(() => {});
+    }, delayMs);
+  }
+
+  /** Cancels a pending Live Activity dismissal (called when a new timer starts). */
+  function cancelActivityEnd() {
+    if (endActivityTimeoutRef.current) {
+      clearTimeout(endActivityTimeoutRef.current);
+      endActivityTimeoutRef.current = null;
+    }
+  }
 
   function scheduleNotification(endTimeMs: number) {
     const msFromNow = endTimeMs - Date.now();
@@ -176,15 +207,19 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
           intervalRef.current = null;
         }
         endTimeRef.current = null;
-        const total = actState.totalSeconds;
-        selectedRef.current = total;
-        _setSelected(total);
-        setRemaining(total);
         setIsRunning(false);
         isRunningRef.current = false;
+        // Show the user's currently-chosen duration, not the stopped timer's.
+        // (Resetting to actState.totalSeconds would overwrite any duration
+        // adjustment the user made since the last timer run.)
+        setRemaining(selectedRef.current);
         // Cancel any pending notification (user already stopped intentionally)
         Notifications.cancelAllScheduledNotificationsAsync().catch(() => {});
         Notifications.dismissAllNotificationsAsync().catch(() => {});
+        // Start 5-min dismissal clock if not already running
+        if (endActivityTimeoutRef.current === null) {
+          scheduleActivityEnd();
+        }
       } else if (actState && actState.isRunning) {
         // ── Timer is (still) running — may have been reset from lock screen ──
         const diff = Math.ceil((actState.endTimeMs - Date.now()) / 1000);
@@ -237,9 +272,10 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
     }
     // Background: let the scheduled notification fire naturally — do NOT cancel
 
-    // Update Live Activity to "Rest Complete" (keeps it alive for ~5 min so
-    // the lock-screen Reset button remains functional)
+    // Update Live Activity to "Rest Complete", then dismiss after 5 minutes
+    // so the Dynamic Island / lock-screen widget doesn't linger indefinitely.
     updateLiveActivity(Date.now(), selectedRef.current, false).catch(() => {});
+    scheduleActivityEnd();
 
     // Play in-app alert only when the app is in the foreground AND not already
     // handled by an OS notification (avoids double-alerting)
@@ -279,6 +315,8 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
   }
 
   function startTimer() {
+    // Cancel any pending Live Activity dismissal from the previous timer.
+    cancelActivityEnd();
     const total = selectedRef.current;
     if (total <= 0) return;
     const end = Date.now() + total * 1000;
@@ -306,6 +344,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
     endTimeRef.current = null;
     Notifications.cancelAllScheduledNotificationsAsync().catch(() => {});
     updateLiveActivity(Date.now(), selectedRef.current, false).catch(() => {});
+    scheduleActivityEnd();
     setRemaining(selectedRef.current);
     setIsRunning(false);
     isRunningRef.current = false;

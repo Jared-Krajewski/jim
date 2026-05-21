@@ -1,7 +1,12 @@
-import Colors from "@/constants/Colors";
-import { CalendarDay, getRecentSessions, getWorkoutCalendarDates, WorkoutSession } from "@/src/db/database";
-import { useActiveWorkout } from "@/src/WorkoutContext";
 import { useColorScheme } from "@/components/useColorScheme";
+import Colors from "@/constants/Colors";
+import {
+  CalendarDay,
+  getRecentSessions,
+  getWorkoutCalendarDates,
+  WorkoutSession,
+} from "@/src/db/database";
+import { useActiveWorkout } from "@/src/WorkoutContext";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
 import React, { useCallback, useRef, useState } from "react";
@@ -84,7 +89,9 @@ function ActivityHeatmap({ data, colorScheme, theme }: HeatmapProps) {
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={{ paddingLeft: 20, paddingRight: 8 }}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+        onContentSizeChange={() =>
+          scrollRef.current?.scrollToEnd({ animated: false })
+        }
       >
         <View>
           {/* Month labels */}
@@ -119,7 +126,11 @@ function ActivityHeatmap({ data, colorScheme, theme }: HeatmapProps) {
                 >
                   {i % 2 === 1 && (
                     <Text
-                      style={{ fontSize: 7, color: theme.textMuted, fontWeight: "500" }}
+                      style={{
+                        fontSize: 7,
+                        color: theme.textMuted,
+                        fontWeight: "500",
+                      }}
                     >
                       {d}
                     </Text>
@@ -266,7 +277,7 @@ export default function HomeScreen() {
           ]}
           onPress={() => router.push("/(tabs)/timer")}
         >
-          <Ionicons name="timer" size={28} color={theme.tint} />
+          <Ionicons name="timer" size={28} color={theme.text} />
           <Text style={[styles.actionCardText, { color: theme.text }]}>
             Rest Timer
           </Text>
@@ -290,9 +301,11 @@ export default function HomeScreen() {
           }
         >
           <View style={styles.inProgressLeft}>
-            <Ionicons name="barbell" size={20} color={theme.tint} />
+            <Ionicons name="barbell" size={20} color={theme.textSecondary} />
             <View style={{ marginLeft: 10 }}>
-              <Text style={[styles.inProgressTitle, { color: theme.tint }]}>
+              <Text
+                style={[styles.inProgressTitle, { color: theme.textSecondary }]}
+              >
                 In Progress
               </Text>
               <Text

@@ -96,9 +96,16 @@ export default function SettingsScreen() {
         return;
       }
 
+      const templateCount = Array.isArray(payload.templates)
+        ? payload.templates.length
+        : 0;
+      const sessionCount = Array.isArray(payload.sessions)
+        ? payload.sessions.length
+        : 0;
+
       Alert.alert(
-        "Replace all data?",
-        `This will delete everything and restore from backup:\n• ${payload.exercises.length} exercises\n• ${payload.templates.length} templates\n• ${payload.sessions.length} sessions\n\nThis cannot be undone.`,
+        "Restore from backup?",
+        `This will restore your data from backup:\n• ${payload.exercises.length} exercises (existing exercises preserved)\n• ${templateCount} templates\n• ${sessionCount} sessions\n\nCurrent templates and session history will be replaced.`,
         [
           { text: "Cancel", style: "cancel" },
           {
@@ -148,7 +155,7 @@ export default function SettingsScreen() {
                 <Ionicons
                   name={isDark ? "moon" : "sunny"}
                   size={20}
-                  color={Colors.accent}
+                  color={theme.textSecondary}
                   style={styles.icon}
                 />
                 <View style={{ flex: 1 }}>
@@ -197,7 +204,7 @@ export default function SettingsScreen() {
                 <Ionicons
                   name="barbell-outline"
                   size={20}
-                  color={Colors.accent}
+                  color={theme.textSecondary}
                   style={styles.icon}
                 />
                 <View style={{ flex: 1 }}>
@@ -255,7 +262,7 @@ export default function SettingsScreen() {
                 <Ionicons
                   name="share-outline"
                   size={20}
-                  color={Colors.accent}
+                  color={theme.textSecondary}
                   style={styles.icon}
                 />
                 <View style={{ flex: 1 }}>
@@ -285,7 +292,7 @@ export default function SettingsScreen() {
                 <Ionicons
                   name="cloud-download-outline"
                   size={20}
-                  color={Colors.accent}
+                  color={theme.textSecondary}
                   style={styles.icon}
                 />
                 <View style={{ flex: 1 }}>

@@ -84,17 +84,17 @@ function RootLayoutNav() {
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen
               name="workout/new"
-              options={{ title: "New Template", presentation: "modal" }}
+              options={{ title: "New Template", headerBackTitle: "Back", presentation: "modal" }}
             />
             <Stack.Screen
               name="workout/[id]"
-              options={{ title: "Edit Template" }}
+              options={{ title: "Edit Template", headerBackTitle: "Back" }}
             />
             <Stack.Screen name="log/[id]" options={{ headerShown: false }} />
             <Stack.Screen name="log/adhoc" options={{ headerShown: false }} />
             <Stack.Screen
               name="session/[id]"
-              options={{ title: "Session Details" }}
+              options={{ title: "Session Details", headerBackTitle: "Back" }}
             />
             <Stack.Screen
               name="settings"

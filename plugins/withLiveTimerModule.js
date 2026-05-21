@@ -21,6 +21,13 @@ const fs = require("fs");
 const BRIDGE_FILES = ["LiveTimerBridge.m", "LiveTimerBridge.swift"];
 const SRC_DIR = path.join(__dirname, "ios-src");
 const BRIDGING_HEADER_IMPORT = "#import <React/RCTBridgeModule.h>";
+const APP_DELEGATE_TERMINATE_HOOK = `
+
+  public override func applicationWillTerminate(_ application: UIApplication) {
+    LiveTimerBridge.endAllActivitiesImmediatelySynchronously()
+    super.applicationWillTerminate(application)
+  }
+`;
 
 function getExistingPaths(xcodeProject) {
   return new Set(
@@ -49,6 +56,31 @@ function ensureReactBridgeImport(bridgingHeaderPath) {
   );
 }
 
+function ensureAppDelegateTerminateHook(appDelegatePath) {
+  if (!fs.existsSync(appDelegatePath)) {
+    return;
+  }
+
+  const current = fs.readFileSync(appDelegatePath, "utf8");
+  if (current.includes("applicationWillTerminate(_ application: UIApplication)")) {
+    return;
+  }
+
+  const marker = "\n}\n\nclass ReactNativeDelegate";
+  if (!current.includes(marker)) {
+    console.warn(
+      "[withLiveTimerModule] Could not find AppDelegate insertion point for termination hook.",
+    );
+    return;
+  }
+
+  const patched = current.replace(
+    marker,
+    `${APP_DELEGATE_TERMINATE_HOOK}\n}\n\nclass ReactNativeDelegate`,
+  );
+  fs.writeFileSync(appDelegatePath, patched);
+}
+
 /** @type {import('@expo/config-plugins').ConfigPlugin} */
 const withLiveTimerModule = (config) => {
   // ── 1. Info.plist ─────────────────────────────────────────────────────────
@@ -58,6 +90,20 @@ const withLiveTimerModule = (config) => {
     c.modResults.NSSupportsLiveActivitiesFrequentUpdates = false;
     return c;
   });
+
+  config = withDangerousMod(config, [
+    "ios",
+    async (c) => {
+      const appDelegatePath = path.join(
+        c.modRequest.projectRoot,
+        "ios",
+        c.modRequest.projectName,
+        "AppDelegate.swift",
+      );
+      ensureAppDelegateTerminateHook(appDelegatePath);
+      return c;
+    },
+  ]);
 
   // ── 2. Xcode project ──────────────────────────────────────────────────────
   config = withXcodeProject(config, (c) => {

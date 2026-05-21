@@ -3,6 +3,7 @@ import Colors from "@/constants/Colors";
 import {
   WorkoutSession,
   WorkoutTemplate,
+  createTemplate,
   deleteSession,
   deleteTemplate,
   getRecentSessions,
@@ -47,6 +48,7 @@ export default function WorkoutsScreen() {
   const [activeTab, setActiveTab] = useState<Tab>("templates");
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
+  const [creatingTemplate, setCreatingTemplate] = useState(false);
 
   // ── Drag-to-reorder state ──────────────────────────────────────────────────
   const draggingIdxRef = useRef(-1);
@@ -187,9 +189,11 @@ export default function WorkoutsScreen() {
           }
         >
           <View style={styles.inProgressLeft}>
-            <Ionicons name="barbell" size={18} color={theme.tint} />
+            <Ionicons name="barbell" size={18} color={theme.textSecondary} />
             <View style={{ marginLeft: 10 }}>
-              <Text style={[styles.inProgressLabel, { color: theme.tint }]}>
+              <Text
+                style={[styles.inProgressLabel, { color: theme.textSecondary }]}
+              >
                 IN PROGRESS
               </Text>
               <Text
@@ -260,12 +264,16 @@ export default function WorkoutsScreen() {
               <Ionicons
                 name="flash"
                 size={20}
-                color={activeWorkout ? theme.textMuted : theme.tint}
+                color={activeWorkout ? theme.textMuted : theme.textSecondary}
               />
               <Text
                 style={[
                   styles.adhocText,
-                  { color: activeWorkout ? theme.textMuted : theme.tint },
+                  {
+                    color: activeWorkout
+                      ? theme.textMuted
+                      : theme.textSecondary,
+                  },
                 ]}
               >
                 Quick (Ad-hoc) Workout
@@ -273,7 +281,7 @@ export default function WorkoutsScreen() {
               <Ionicons
                 name="chevron-forward"
                 size={16}
-                color={activeWorkout ? theme.textMuted : theme.tint}
+                color={activeWorkout ? theme.textMuted : theme.textSecondary}
               />
             </TouchableOpacity>
 
@@ -292,7 +300,12 @@ export default function WorkoutsScreen() {
 
             {templates.map((item, idx) => {
               const isDragging = draggingIdx === idx;
-              const isHover = hoverIdx === idx && !isDragging;
+              const hoverIndicator: "top" | "bottom" | null =
+                !isDragging && hoverIdx === idx
+                  ? draggingIdx > idx
+                    ? "top"
+                    : "bottom"
+                  : null;
               return (
                 <Animated.View
                   key={item.id}
@@ -305,9 +318,18 @@ export default function WorkoutsScreen() {
                   style={[
                     styles.templateCard,
                     {
-                      backgroundColor: theme.card,
-                      borderColor: isHover ? theme.tint : theme.border,
-                      borderWidth: isHover ? 2 : 1,
+                      backgroundColor: hoverIndicator
+                        ? Colors.accent + "12"
+                        : theme.card,
+                      borderColor: theme.border,
+                      borderTopColor:
+                        hoverIndicator === "top" ? Colors.accent : theme.border,
+                      borderTopWidth: hoverIndicator === "top" ? 3 : 1,
+                      borderBottomColor:
+                        hoverIndicator === "bottom"
+                          ? Colors.accent
+                          : theme.border,
+                      borderBottomWidth: hoverIndicator === "bottom" ? 3 : 1,
                       opacity: isDragging ? 0.6 : 1,
                     },
                     isDragging && {
@@ -473,8 +495,26 @@ export default function WorkoutsScreen() {
       {/* FAB — only on templates tab */}
       {activeTab === "templates" && (
         <TouchableOpacity
-          style={[styles.fab, { backgroundColor: Colors.accent }]}
-          onPress={() => router.push("/workout/new")}
+          style={[
+            styles.fab,
+            {
+              backgroundColor: Colors.accent,
+              opacity: creatingTemplate ? 0.7 : 1,
+            },
+          ]}
+          onPress={async () => {
+            if (creatingTemplate) return;
+            setCreatingTemplate(true);
+            try {
+              const newId = await createTemplate("", "");
+              router.push(`/workout/${newId}?isNew=1` as any);
+            } catch (e) {
+              console.error(e);
+            } finally {
+              setCreatingTemplate(false);
+            }
+          }}
+          disabled={creatingTemplate}
         >
           <Ionicons name="add" size={28} color="#fff" />
         </TouchableOpacity>
@@ -553,7 +593,7 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     historyLeft: { flex: 1 },
     historyName: { fontSize: 15, fontWeight: "600" },
     historyDate: { fontSize: 13, marginTop: 2 },
-    historyRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+    historyRight: { flexDirection: "row", alignItems: "center", gap: 24 },
     empty: { alignItems: "center", paddingTop: 60, gap: 12 },
     emptyText: { fontSize: 15, textAlign: "center", lineHeight: 22 },
     fab: {

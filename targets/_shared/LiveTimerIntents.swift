@@ -3,6 +3,17 @@ import AppIntents
 import Foundation
 import UserNotifications
 
+private let stoppedActivityLifetime: TimeInterval = 60 * 5
+
+@available(iOS 17.2, *)
+private func dismissalPolicy(after referenceDate: Date) -> ActivityUIDismissalPolicy {
+    let dismissAt = referenceDate.addingTimeInterval(stoppedActivityLifetime)
+    if dismissAt <= Date() {
+        return .immediate
+    }
+    return .after(dismissAt)
+}
+
 // MARK: - Stop Timer Intent
 // LiveActivityIntent (iOS 17.2+) is required for Button(intent:) to fire
 // from the lock-screen banner. Plain AppIntent silently fails there.
@@ -16,18 +27,16 @@ struct StopTimerIntent: LiveActivityIntent {
         for activity in Activity<LiveTimerAttributes>.activities
             where activity.activityState == .active || activity.activityState == .stale
         {
-            // Update to a paused (isRunning=false) state rather than ending
-            // the activity. This keeps the activity alive so the Reset button
-            // can still find it and restart the countdown.
             let stopped = LiveTimerAttributes.ContentState(
                 endTime: Date(),
                 totalSeconds: activity.content.state.totalSeconds,
                 isRunning: false
             )
-            await activity.update(ActivityContent(
+            let content = ActivityContent(
                 state: stopped,
-                staleDate: Date().addingTimeInterval(60 * 5) // keep alive 5 min
-            ))
+                staleDate: stopped.endTime.addingTimeInterval(stoppedActivityLifetime)
+            )
+            await activity.update(content)
         }
         // Cancel any pending timer alert so it doesn't fire after the user stopped.
         UNUserNotificationCenter.current()
@@ -56,7 +65,7 @@ struct ResetTimerIntent: LiveActivityIntent {
             )
             await activity.update(ActivityContent(
                 state: running,
-                staleDate: newEnd.addingTimeInterval(30)
+                staleDate: newEnd.addingTimeInterval(stoppedActivityLifetime)
             ))
 
             // The JS app is suspended in the background and cannot schedule a

@@ -6,11 +6,13 @@ import {
   Exercise,
   MuscleGroupVolume,
   ProgressPoint,
+  SessionDuration,
   getAllTimeMuscleGroupVolumes,
   getAllVolumeProgress,
   getExerciseProgress,
-  getExercises,
+  getExercisesWithData,
   getMuscleGroupProgress,
+  getSessionDurations,
 } from "@/src/db/database";
 import { useUnit } from "@/src/UnitContext";
 import { Ionicons } from "@expo/vector-icons";
@@ -67,10 +69,13 @@ export default function ProgressScreen() {
   const [allTimeMuscleVolumes, setAllTimeMuscleVolumes] = useState<
     MuscleGroupVolume[]
   >([]);
+  const [sessionDurations, setSessionDurations] = useState<SessionDuration[]>(
+    [],
+  );
 
   useFocusEffect(
     useCallback(() => {
-      getExercises().then((exs) => {
+      getExercisesWithData().then((exs) => {
         setExercises(exs);
         if (!selectedExercise && exs.length > 0) {
           selectExercise(exs[0]);
@@ -78,6 +83,9 @@ export default function ProgressScreen() {
       });
       getAllTimeMuscleGroupVolumes()
         .then(setAllTimeMuscleVolumes)
+        .catch(() => {});
+      getSessionDurations()
+        .then(setSessionDurations)
         .catch(() => {});
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
@@ -155,6 +163,101 @@ export default function ProgressScreen() {
 
   const chartWidth = SCREEN_WIDTH - 48;
 
+  // Helper to avoid UTC timezone shifting issues from toISOString()
+  function localDateString(date: Date): string {
+    return date.toLocaleDateString("en-CA");
+  }
+
+  function subtractDays(date: Date, days: number): Date {
+    const result = new Date(date);
+    result.setDate(result.getDate() - days);
+    return result;
+  }
+
+  // ACWR computation
+  const now = new Date();
+  const nowStr = localDateString(now);
+  const sixDaysAgo = localDateString(subtractDays(now, 6));
+
+  // Acute = total load over last 7 days (today + 6 prior days)
+  const acute7 = sessionDurations.filter(
+    (s) => s.date >= sixDaysAgo && s.date <= nowStr,
+  );
+  const acuteLoad = acute7.reduce((sum, d) => sum + d.duration_minutes, 0);
+
+  // Chronic = average weekly load over previous 4 weeks
+  // Excludes current rolling acute week
+  const weekTotals = [0, 1, 2, 3].map((weekOffset) => {
+    const start = localDateString(subtractDays(now, (weekOffset + 2) * 7));
+    const end = localDateString(subtractDays(now, (weekOffset + 1) * 7));
+    return sessionDurations
+      .filter((s) => s.date >= start && s.date < end)
+      .reduce((sum, d) => sum + d.duration_minutes, 0);
+  });
+
+  // Only use weeks that actually contain data
+  const validWeeks = weekTotals.filter((w) => w > 0);
+  const chronicLoad =
+    validWeeks.length > 0
+      ? validWeeks.reduce((a, b) => a + b, 0) / validWeeks.length
+      : 0;
+
+  // Require at least 2 full historical week before showing ACWR
+  const hasEnoughHistory = validWeeks.length > 1;
+  const acwr =
+    hasEnoughHistory && chronicLoad > 0 ? acuteLoad / chronicLoad : null;
+
+  function acwrZone(v: number | null): {
+    color: string;
+    label: string;
+    description: string;
+  } {
+    if (v === null)
+      return {
+        color: theme.textMuted,
+        label: "Building Baseline",
+        description:
+          "Train consistently for multiple weeks to establish your baseline.",
+      };
+    if (v < 0.8)
+      return {
+        color: "#5B9BD5",
+        label: "Under-training",
+        description:
+          "You're below your recent baseline. Volume may be too low.",
+      };
+    if (v <= 1.3)
+      return {
+        color: Colors.success,
+        label: "Optimal Zone",
+        description: "Training load is balanced and sustainable.",
+      };
+    if (v <= 1.5)
+      return {
+        color: Colors.warning,
+        label: "Overreaching",
+        description:
+          "Fatigue is elevated. Consider a lighter session or recovery day.",
+      };
+    return {
+      color: Colors.danger,
+      label: "Overtraining Risk",
+      description: "Training load has spiked sharply. Recovery is recommended.",
+    };
+  }
+
+  const zone = acwrZone(acwr);
+
+  const durationChartData = sessionDurations.slice(-20).map((s) => ({
+    value: s.duration_minutes,
+    label: formatDate(s.date),
+    dataPointText: `${Math.round(s.duration_minutes)}m`,
+  }));
+
+  const maxDuration =
+    durationChartData.length > 0
+      ? Math.max(...durationChartData.map((d) => d.value))
+      : 0;
   // Human-readable label for the current selection
   const selectionLabel =
     trackMode === "exercise"
@@ -282,10 +385,14 @@ export default function ProgressScreen() {
                   },
                 ]}
               >
-                <Text style={[styles.statValue, { color: theme.tint }]}>
+                <Text
+                  style={[styles.statValue, { color: theme.textSecondary }]}
+                >
                   {pr} {unit}
                 </Text>
-                <Text style={[styles.statLabel, { color: theme.tint }]}>
+                <Text
+                  style={[styles.statLabel, { color: theme.textSecondary }]}
+                >
                   All-time PR
                 </Text>
               </View>
@@ -294,15 +401,15 @@ export default function ProgressScreen() {
               style={[
                 styles.statCard,
                 {
-                  backgroundColor: Colors.teal + "18",
-                  borderColor: Colors.teal + "44",
+                  backgroundColor: theme.card,
+                  borderColor: theme.border,
                 },
               ]}
             >
-              <Text style={[styles.statValue, { color: Colors.teal }]}>
+              <Text style={[styles.statValue, { color: theme.text }]}>
                 {progress.length}
               </Text>
-              <Text style={[styles.statLabel, { color: Colors.teal }]}>
+              <Text style={[styles.statLabel, { color: theme.textSecondary }]}>
                 Sessions
               </Text>
             </View>
@@ -365,7 +472,7 @@ export default function ProgressScreen() {
             </Text>
             <LineChart
               data={chartData}
-              width={chartWidth - 32}
+              width={chartWidth}
               height={200}
               maxValue={chartMaxValue}
               color={theme.tint}
@@ -388,6 +495,8 @@ export default function ProgressScreen() {
               rulesType="solid"
               showVerticalLines={false}
               adjustToWidth
+              endSpacing={35}
+              initialSpacing={5}
             />
           </View>
 
@@ -424,6 +533,160 @@ export default function ProgressScreen() {
                 </Text>
               </View>
             ))}
+          {/* Session duration chart + ACWR — shown only on Overall tab */}
+          {trackMode === "total" && sessionDurations.length > 0 && (
+            <>
+              {/* Session Duration Chart */}
+              <View
+                style={[
+                  styles.card,
+                  { backgroundColor: theme.card, borderColor: theme.border },
+                ]}
+              >
+                <Text style={[styles.cardTitle, { color: theme.text }]}>
+                  Session Duration
+                </Text>
+                <Text style={[styles.cardSub, { color: theme.textSecondary }]}>
+                  Last {durationChartData.length} sessions (minutes)
+                </Text>
+                <LineChart
+                  data={durationChartData}
+                  width={chartWidth - 32}
+                  height={160}
+                  color={Colors.accent}
+                  thickness={2}
+                  dataPointsColor={Colors.accent}
+                  dataPointsRadius={3}
+                  startFillColor={Colors.accent}
+                  startOpacity={0.25}
+                  endOpacity={0.02}
+                  areaChart
+                  curved
+                  hideRules={false}
+                  rulesColor={theme.border}
+                  rulesType="solid"
+                  yAxisColor={theme.border}
+                  xAxisColor={theme.border}
+                  yAxisTextStyle={{ color: theme.textMuted, fontSize: 10 }}
+                  xAxisLabelTextStyle={{
+                    color: theme.textMuted,
+                    fontSize: 9,
+                  }}
+                  maxValue={
+                    maxDuration > 0 ? Math.ceil(maxDuration * 1.15) : undefined
+                  }
+                  noOfSections={4}
+                  showDataPointOnFocus
+                  showStripOnFocus
+                  stripColor={Colors.accent + "44"}
+                  focusedDataPointColor={Colors.accent}
+                />
+              </View>
+
+              {/* ACWR Card */}
+              <View
+                style={[
+                  styles.card,
+                  {
+                    backgroundColor: theme.card,
+                    borderColor: theme.border,
+                    borderLeftWidth: 4,
+                    borderLeftColor: zone.color,
+                  },
+                ]}
+              >
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                  }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.cardTitle, { color: theme.text }]}>
+                      Training Load (ACWR)
+                    </Text>
+                    <Text
+                      style={[
+                        styles.cardSub,
+                        { color: zone.color, fontWeight: "700", marginTop: 4 },
+                      ]}
+                    >
+                      {zone.label}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.cardSub,
+                        { color: theme.textSecondary, marginTop: 4 },
+                      ]}
+                    >
+                      {zone.description}
+                    </Text>
+                  </View>
+                  {acwr !== null && (
+                    <Text
+                      style={{
+                        fontSize: 28,
+                        fontWeight: "700",
+                        color: zone.color,
+                        marginLeft: 12,
+                      }}
+                    >
+                      {acwr.toFixed(2)}
+                    </Text>
+                  )}
+                </View>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    marginTop: 12,
+                    gap: 16,
+                  }}
+                >
+                  <View>
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: theme.textMuted,
+                        fontWeight: "600",
+                      }}
+                    >
+                      ACUTE (7d avg)
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 15,
+                        fontWeight: "700",
+                        color: theme.text,
+                      }}
+                    >
+                      {acuteLoad.toFixed(1)} min/day
+                    </Text>
+                  </View>
+                  <View>
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: theme.textMuted,
+                        fontWeight: "600",
+                      }}
+                    >
+                      CHRONIC (28d avg)
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 15,
+                        fontWeight: "700",
+                        color: theme.text,
+                      }}
+                    >
+                      {chronicLoad.toFixed(1)} min/day
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </>
+          )}
         </>
       ) : null}
 
@@ -444,7 +707,9 @@ export default function ProgressScreen() {
             style={[styles.pickerHeader, { borderBottomColor: theme.border }]}
           >
             <TouchableOpacity onPress={() => setPickerVisible(false)}>
-              <Text style={{ color: theme.tint, fontSize: 16 }}>Cancel</Text>
+              <Text style={{ color: theme.textSecondary, fontSize: 16 }}>
+                Cancel
+              </Text>
             </TouchableOpacity>
             <Text style={[styles.pickerTitle, { color: theme.text }]}>
               Select Exercise
@@ -465,6 +730,8 @@ export default function ProgressScreen() {
               value={pickerSearch}
               onChangeText={setPickerSearch}
               autoFocus
+              autoCorrect={false}
+              autoCapitalize="none"
             />
           </View>
           <FlatList
@@ -623,6 +890,15 @@ function makeStyles(theme: (typeof Colors)["light"]) {
       borderWidth: 1,
       overflow: "hidden",
     },
+    card: {
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 16,
+      borderWidth: 1,
+      overflow: "hidden",
+    },
+    cardTitle: { fontSize: 14, fontWeight: "600", marginBottom: 4 },
+    cardSub: { fontSize: 12, marginBottom: 0 },
     chartTitle: { fontSize: 14, fontWeight: "600", marginBottom: 12 },
     tableTitle: {
       fontSize: 11,

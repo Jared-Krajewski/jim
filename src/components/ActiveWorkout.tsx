@@ -4,11 +4,13 @@
  */
 import { useColorScheme } from "@/components/useColorScheme";
 import Colors from "@/constants/Colors";
+import { MUSCLE_GROUPS } from "@/constants/MuscleGroups";
 import {
   Exercise,
   SessionSet,
   addSet,
   completeSession,
+  createExercise,
   createSession,
   deleteSession,
   deleteSet,
@@ -58,6 +60,13 @@ type ExerciseGroup = {
   exercise: { id: number; name: string; muscle_group: string };
   sets: SessionSet[];
 };
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Constants
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Workouts longer than this are auto-completed to avoid stale sessions. */
+const MAX_WORKOUT_SECONDS = 2.5 * 60 * 60; // 9 000 seconds
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -327,11 +336,28 @@ export default function ActiveWorkoutScreen({
   const [allExercises, setAllExercises] = useState<Exercise[]>([]);
   const [pickerSearch, setPickerSearch] = useState("");
 
+  // Create-new-exercise form — rendered inside the picker modal (avoids iOS modal stacking)
+  const [pickerView, setPickerView] = useState<"list" | "create">("list");
+  const [newExName, setNewExName] = useState("");
+  const [newExMuscle, setNewExMuscle] = useState<string>(MUSCLE_GROUPS[0]);
+  const [newExReps, setNewExReps] = useState("10");
+  const [newExWeight, setNewExWeight] = useState("");
+  const [newExSaving, setNewExSaving] = useState(false);
+  const [pickerMuscleFilter, setPickerMuscleFilter] = useState<string | null>(
+    null,
+  );
+
   // Drag-to-reorder state
   const groupsRef = useRef<ExerciseGroup[]>([]);
   useEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
+
+  // Mirror finishedExerciseIds into a ref so the PanResponder closure can read it
+  const finishedExerciseIdsRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    finishedExerciseIdsRef.current = finishedExerciseIds;
+  }, [finishedExerciseIds]);
 
   const draggingIdxRef = useRef(-1);
   const [draggingIdx, setDraggingIdx] = useState(-1);
@@ -344,13 +370,19 @@ export default function ActiveWorkoutScreen({
   const isDraggingRef = useRef(false);
 
   function startDrag(idx: number, pageY: number) {
-    // Measure all items for accurate absolute-position hover detection
-    groupsRef.current.forEach((_, i) => {
-      (itemRefs.current[i] as View | null)?.measure?.(
-        (_fx, _fy, _w, h, _px, py) => {
-          itemAbsoluteY.current[i] = { y: py, height: h };
-        },
-      );
+    // Measure only active (non-done) group items
+    itemAbsoluteY.current = [];
+    const doneIds = finishedExerciseIdsRef.current;
+    let ai = 0;
+    groupsRef.current.forEach((g) => {
+      if (!doneIds.has(g.exercise.id)) {
+        const i = ai++;
+        (itemRefs.current[i] as View | null)?.measure?.(
+          (_fx, _fy, _w, h, _px, py) => {
+            itemAbsoluteY.current[i] = { y: py, height: h };
+          },
+        );
+      }
     });
     dragStartAbsY.current = pageY;
     draggingIdxRef.current = idx;
@@ -395,10 +427,18 @@ export default function ActiveWorkoutScreen({
         const from = draggingIdxRef.current;
         const to = hoverIdxRef.current;
         if (from >= 0 && to >= 0 && from !== to) {
-          // Use groupsRef to avoid calling setExerciseOrder inside setState callback
-          const newGroups = [...groupsRef.current];
-          const [item] = newGroups.splice(from, 1);
-          newGroups.splice(to, 0, item);
+          // Reorder only the active (non-done) groups, then recombine
+          const doneIds = finishedExerciseIdsRef.current;
+          const activeOnly = groupsRef.current.filter(
+            (g) => !doneIds.has(g.exercise.id),
+          );
+          const completedOnly = groupsRef.current.filter((g) =>
+            doneIds.has(g.exercise.id),
+          );
+          const newActive = [...activeOnly];
+          const [item] = newActive.splice(from, 1);
+          newActive.splice(to, 0, item);
+          const newGroups = [...newActive, ...completedOnly];
           setGroups(newGroups);
           setExerciseOrder(newGroups.map((g) => g.exercise.id));
         }
@@ -431,6 +471,21 @@ export default function ActiveWorkoutScreen({
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
+
+  // Auto-end workout after 2.5 hours to prevent forgotten sessions
+  useEffect(() => {
+    if (elapsedSec >= MAX_WORKOUT_SECONDS && sessionId) {
+      (async () => {
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        await completeSession(sessionId);
+        setActiveWorkout(null);
+        router.replace("/(tabs)/workouts");
+      })();
+    }
+  }, [elapsedSec, sessionId]);
 
   // ── Resume an existing in-progress session ─────────────────────────────────
 
@@ -530,6 +585,7 @@ export default function ActiveWorkoutScreen({
     const exs = await getExercises();
     setAllExercises(exs);
     setPickerSearch("");
+    setPickerMuscleFilter(null);
     setPickerVisible(true);
   }
 
@@ -544,6 +600,44 @@ export default function ActiveWorkoutScreen({
     );
     setPickerVisible(false);
     await loadSets();
+  }
+
+  async function handleCreateNewExercise() {
+    const name = newExName.trim();
+    if (!name) {
+      Alert.alert("Name required", "Please give this exercise a name.");
+      return;
+    }
+    setNewExSaving(true);
+    try {
+      const exId = await createExercise(
+        name,
+        newExMuscle,
+        "",
+        parseFloat(newExWeight) || 0,
+        unit,
+        parseInt(newExReps, 10) || 10,
+      );
+      if (sessionId) {
+        await addSet(
+          sessionId,
+          exId,
+          1,
+          parseInt(newExReps, 10) || 10,
+          parseFloat(newExWeight) || 0,
+        );
+      }
+      setPickerView("list");
+      setPickerVisible(false);
+      await loadSets();
+      // Refresh the all-exercises list for next time picker opens
+      const exs = await getExercises();
+      setAllExercises(exs);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setNewExSaving(false);
+    }
   }
 
   // ── Finish ──────────────────────────────────────────────────────────────────
@@ -586,6 +680,34 @@ export default function ActiveWorkoutScreen({
     router.back();
   }
 
+  // ── Move exercises to top/bottom of list ───────────────────────────────────────
+
+  function moveToTop(idx: number) {
+    const doneIds = finishedExerciseIds;
+    const active = groups.filter((g) => !doneIds.has(g.exercise.id));
+    const done = groups.filter((g) => doneIds.has(g.exercise.id));
+    if (idx === 0) return;
+    const newActive = [...active];
+    const [item] = newActive.splice(idx, 1);
+    newActive.unshift(item);
+    const newGroups = [...newActive, ...done];
+    setGroups(newGroups);
+    setExerciseOrder(newGroups.map((g) => g.exercise.id));
+  }
+
+  function moveToBottom(idx: number) {
+    const doneIds = finishedExerciseIds;
+    const active = groups.filter((g) => !doneIds.has(g.exercise.id));
+    const done = groups.filter((g) => doneIds.has(g.exercise.id));
+    if (idx === active.length - 1) return;
+    const newActive = [...active];
+    const [item] = newActive.splice(idx, 1);
+    newActive.push(item);
+    const newGroups = [...newActive, ...done];
+    setGroups(newGroups);
+    setExerciseOrder(newGroups.map((g) => g.exercise.id));
+  }
+
   // ── Finish / unfinish individual exercises ──────────────────────────────────
 
   function finishExercise(id: number) {
@@ -613,9 +735,14 @@ export default function ActiveWorkoutScreen({
 
   // ── Filtered picker ─────────────────────────────────────────────────────────
 
-  const filteredPicker = allExercises.filter((e) =>
-    e.name.toLowerCase().includes(pickerSearch.toLowerCase()),
-  );
+  const filteredPicker = allExercises.filter((e) => {
+    const matchSearch = e.name
+      .toLowerCase()
+      .includes(pickerSearch.toLowerCase());
+    const matchMuscle =
+      !pickerMuscleFilter || e.muscle_group === pickerMuscleFilter;
+    return matchSearch && matchMuscle;
+  });
 
   const activeGroups = groups.filter(
     (g) => !finishedExerciseIds.has(g.exercise.id),
@@ -625,10 +752,7 @@ export default function ActiveWorkoutScreen({
   );
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: theme.background }]}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    <View style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
       <View
         style={[
@@ -646,7 +770,8 @@ export default function ActiveWorkoutScreen({
           >
             {sessionName}
           </Text>
-          <Text style={[styles.headerTimer, { color: Colors.accent }]}>
+          {/* in progress workout timer */}
+          <Text style={[styles.headerTimer, { color: theme.textSecondary }]}>
             {formatTime(elapsedSec)}
           </Text>
         </View>
@@ -656,11 +781,6 @@ export default function ActiveWorkoutScreen({
         >
           <Text style={styles.finishBtnText}>Finish</Text>
         </TouchableOpacity>
-      </View>
-
-      {/* Sticky rest timer — always visible below the header */}
-      <View style={{ backgroundColor: theme.background }}>
-        <WorkoutTimer theme={theme} />
       </View>
 
       {/* Exercise list with drag-to-reorder */}
@@ -727,21 +847,13 @@ export default function ActiveWorkoutScreen({
                     onUpdateSet={handleUpdateSet}
                     onDeleteSet={handleDeleteSet}
                     onFinish={() => finishExercise(group.exercise.id)}
+                    onMoveToTop={() => moveToTop(idx)}
+                    onMoveToBottom={() => moveToBottom(idx)}
                   />
                 </Animated.View>
               </View>
             );
           })}
-
-          <TouchableOpacity
-            style={[styles.addExBtn, { borderColor: Colors.accent }]}
-            onPress={openPicker}
-          >
-            <Ionicons name="add-circle" size={20} color={Colors.accent} />
-            <Text style={[styles.addExText, { color: Colors.accent }]}>
-              Add Exercise
-            </Text>
-          </TouchableOpacity>
 
           {completedGroups.length > 0 && (
             <View style={styles.completedSection}>
@@ -765,19 +877,37 @@ export default function ActiveWorkoutScreen({
             </View>
           )}
         </ScrollView>
+        {/* Sticky rest timer — always visible below the header */}
+        <View style={{ backgroundColor: theme.background }}>
+          <WorkoutTimer theme={theme} />
+        </View>
+        <TouchableOpacity
+          style={[styles.addExBtn, { borderColor: Colors.accent }]}
+          onPress={openPicker}
+        >
+          <Ionicons name="add-circle" size={20} color={theme.textSecondary} />
+          <Text style={[styles.addExText, { color: theme.textSecondary }]}>
+            Add Exercise
+          </Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Exercise picker */}
+      {/* Exercise picker + create form — single modal to avoid iOS modal stacking */}
       <Modal
         visible={pickerVisible}
         animationType="slide"
         presentationStyle="pageSheet"
+        onRequestClose={() => {
+          setPickerVisible(false);
+          setPickerView("list");
+        }}
       >
-        <View
+        <KeyboardAvoidingView
           style={[
             styles.pickerContainer,
             { backgroundColor: theme.background },
           ]}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           {/* Drag indicator */}
           <View style={styles.dragHandle}>
@@ -786,65 +916,367 @@ export default function ActiveWorkoutScreen({
           <View
             style={[styles.pickerHeader, { borderBottomColor: theme.border }]}
           >
-            <TouchableOpacity onPress={() => setPickerVisible(false)}>
-              <Text style={{ color: Colors.accent, fontSize: 16 }}>Done</Text>
-            </TouchableOpacity>
-            <Text style={[styles.pickerTitle, { color: theme.text }]}>
-              Add Exercise
-            </Text>
-            <View style={{ width: 50 }} />
-          </View>
-          <View
-            style={[
-              styles.pickerSearch,
-              { backgroundColor: theme.inputBg, borderColor: theme.border },
-            ]}
-          >
-            <Ionicons name="search" size={16} color={theme.textMuted} />
-            <TextInput
-              style={[{ flex: 1, fontSize: 15, color: theme.text }]}
-              placeholder="Search…"
-              placeholderTextColor={theme.textMuted}
-              value={pickerSearch}
-              onChangeText={setPickerSearch}
-              autoFocus
-            />
-          </View>
-          <FlatList
-            data={filteredPicker}
-            keyExtractor={(e) => String(e.id)}
-            contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.pickerItem, { borderBottomColor: theme.border }]}
-                onPress={() => addExerciseThenSet(item)}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.pickerItemName, { color: theme.text }]}>
-                    {item.name}
+            {pickerView === "list" ? (
+              <>
+                <TouchableOpacity
+                  onPress={() => {
+                    setPickerVisible(false);
+                    setPickerView("list");
+                  }}
+                >
+                  <Text style={{ color: theme.textSecondary, fontSize: 16 }}>
+                    Done
                   </Text>
-                  <Text style={{ color: theme.textSecondary, fontSize: 13 }}>
-                    {item.muscle_group}
+                </TouchableOpacity>
+                <Text style={[styles.pickerTitle, { color: theme.text }]}>
+                  Add Exercise
+                </Text>
+                <View style={{ width: 50 }} />
+              </>
+            ) : (
+              <>
+                <TouchableOpacity onPress={() => setPickerView("list")}>
+                  <Text style={{ color: theme.textSecondary, fontSize: 16 }}>
+                    Back
                   </Text>
-                </View>
-                <Ionicons name="add-circle" size={22} color={Colors.accent} />
-              </TouchableOpacity>
+                </TouchableOpacity>
+                <Text style={[styles.pickerTitle, { color: theme.text }]}>
+                  New Exercise
+                </Text>
+                <View style={{ width: 50 }} />
+              </>
             )}
-            ListEmptyComponent={
-              <Text
-                style={{
-                  color: theme.textMuted,
-                  textAlign: "center",
-                  paddingTop: 40,
+          </View>
+
+          {pickerView === "list" ? (
+            <>
+              <View
+                style={[
+                  styles.pickerSearch,
+                  { backgroundColor: theme.inputBg, borderColor: theme.border },
+                ]}
+              >
+                <Ionicons name="search" size={16} color={theme.textMuted} />
+                <TextInput
+                  style={[{ flex: 1, fontSize: 15, color: theme.text }]}
+                  placeholder="Search…"
+                  placeholderTextColor={theme.textMuted}
+                  value={pickerSearch}
+                  onChangeText={setPickerSearch}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                />
+              </View>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.chipScroll}
+                contentContainerStyle={styles.chipRow}
+                keyboardShouldPersistTaps="handled"
+              >
+                  <TouchableOpacity
+                    style={[
+                      styles.chip,
+                      {
+                        backgroundColor: !pickerMuscleFilter
+                          ? Colors.accent
+                          : theme.card,
+                        borderColor: !pickerMuscleFilter
+                          ? Colors.accent
+                          : theme.border,
+                      },
+                    ]}
+                    onPress={() => setPickerMuscleFilter(null)}
+                  >
+                    <Text
+                      style={{
+                        color: !pickerMuscleFilter
+                          ? "#fff"
+                          : theme.textSecondary,
+                        fontSize: 13,
+                        fontWeight: "600",
+                      }}
+                    >
+                      All
+                    </Text>
+                  </TouchableOpacity>
+                  {MUSCLE_GROUPS.map((mg) => (
+                    <TouchableOpacity
+                      key={mg}
+                      style={[
+                        styles.chip,
+                        {
+                          backgroundColor:
+                            pickerMuscleFilter === mg
+                              ? Colors.accent
+                              : theme.card,
+                          borderColor:
+                            pickerMuscleFilter === mg
+                              ? Colors.accent
+                              : theme.border,
+                        },
+                      ]}
+                      onPress={() =>
+                        setPickerMuscleFilter(
+                          pickerMuscleFilter === mg ? null : mg,
+                        )
+                      }
+                    >
+                      <Text
+                        style={{
+                          color:
+                            pickerMuscleFilter === mg
+                              ? "#fff"
+                              : theme.textSecondary,
+                          fontSize: 13,
+                          fontWeight: "600",
+                        }}
+                      >
+                        {mg}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+              </ScrollView>
+              {/* Create New Exercise shortcut */}
+              <TouchableOpacity
+                style={[
+                  styles.createExBtn,
+                  { borderColor: Colors.accent, marginHorizontal: 12 },
+                ]}
+                onPress={() => {
+                  setNewExName("");
+                  setNewExMuscle(MUSCLE_GROUPS[0]);
+                  setNewExReps("10");
+                  setNewExWeight("");
+                  setPickerView("create");
                 }}
               >
-                No exercises found.
+                <Ionicons
+                  name="add-circle"
+                  size={16}
+                  color={theme.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.createExBtnText,
+                    { color: theme.textSecondary },
+                  ]}
+                >
+                  Create New Exercise
+                </Text>
+              </TouchableOpacity>
+              <FlatList
+                data={filteredPicker}
+                keyExtractor={(e) => String(e.id)}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={[
+                      styles.pickerItem,
+                      { borderBottomColor: theme.border },
+                    ]}
+                    onPress={() => addExerciseThenSet(item)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[styles.pickerItemName, { color: theme.text }]}
+                      >
+                        {item.name}
+                      </Text>
+                      <Text
+                        style={{ color: theme.textSecondary, fontSize: 13 }}
+                      >
+                        {item.muscle_group}
+                      </Text>
+                    </View>
+                    <Ionicons
+                      name="add-circle"
+                      size={22}
+                      color={Colors.accent}
+                    />
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  <Text
+                    style={{
+                      color: theme.textMuted,
+                      textAlign: "center",
+                      paddingTop: 40,
+                    }}
+                  >
+                    No exercises found.
+                  </Text>
+                }
+              />
+            </>
+          ) : (
+            <ScrollView
+              contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: "600",
+                  letterSpacing: 0.6,
+                  color: theme.textSecondary,
+                  marginBottom: 6,
+                }}
+              >
+                EXERCISE NAME *
               </Text>
-            }
-          />
-        </View>
+              <TextInput
+                style={[
+                  {
+                    borderRadius: 10,
+                    borderWidth: 1,
+                    paddingHorizontal: 14,
+                    paddingVertical: 12,
+                    fontSize: 16,
+                    marginBottom: 20,
+                    backgroundColor: theme.inputBg,
+                    borderColor: theme.border,
+                    color: theme.text,
+                  },
+                ]}
+                placeholder="e.g. Barbell Curl"
+                placeholderTextColor={theme.textMuted}
+                value={newExName}
+                onChangeText={setNewExName}
+                autoFocus
+              />
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: "600",
+                  letterSpacing: 0.6,
+                  color: theme.textSecondary,
+                  marginBottom: 8,
+                }}
+              >
+                MUSCLE GROUP
+              </Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.chipScroll}
+                contentContainerStyle={styles.chipRow}
+              >
+                  {MUSCLE_GROUPS.map((mg) => (
+                    <TouchableOpacity
+                      key={mg}
+                      style={[
+                        styles.chip,
+                        {
+                          backgroundColor:
+                            newExMuscle === mg ? Colors.accent : theme.card,
+                          borderColor:
+                            newExMuscle === mg ? Colors.accent : theme.border,
+                        },
+                      ]}
+                      onPress={() => setNewExMuscle(mg)}
+                    >
+                      <Text
+                        style={{
+                          color:
+                            newExMuscle === mg ? "#fff" : theme.textSecondary,
+                          fontSize: 13,
+                          fontWeight: "600",
+                        }}
+                      >
+                        {mg}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+              </ScrollView>
+              <View style={{ flexDirection: "row", gap: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: "600",
+                      letterSpacing: 0.6,
+                      color: theme.textSecondary,
+                      marginBottom: 6,
+                    }}
+                  >
+                    DEFAULT REPS
+                  </Text>
+                  <TextInput
+                    style={{
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      paddingHorizontal: 14,
+                      paddingVertical: 12,
+                      fontSize: 16,
+                      marginBottom: 20,
+                      backgroundColor: theme.inputBg,
+                      borderColor: theme.border,
+                      color: theme.text,
+                    }}
+                    value={newExReps}
+                    onChangeText={setNewExReps}
+                    keyboardType="number-pad"
+                    selectTextOnFocus
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: "600",
+                      letterSpacing: 0.6,
+                      color: theme.textSecondary,
+                      marginBottom: 6,
+                    }}
+                  >
+                    DEFAULT WEIGHT ({unit.toUpperCase()})
+                  </Text>
+                  <TextInput
+                    style={{
+                      borderRadius: 10,
+                      borderWidth: 1,
+                      paddingHorizontal: 14,
+                      paddingVertical: 12,
+                      fontSize: 16,
+                      marginBottom: 20,
+                      backgroundColor: theme.inputBg,
+                      borderColor: theme.border,
+                      color: theme.text,
+                    }}
+                    value={newExWeight}
+                    onChangeText={setNewExWeight}
+                    keyboardType="decimal-pad"
+                    selectTextOnFocus
+                    placeholder="0"
+                    placeholderTextColor={theme.textMuted}
+                  />
+                </View>
+              </View>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: newExSaving
+                    ? Colors.accent + "88"
+                    : Colors.accent,
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  alignItems: "center",
+                }}
+                onPress={handleCreateNewExercise}
+                disabled={newExSaving}
+              >
+                <Text
+                  style={{ color: "#fff", fontWeight: "700", fontSize: 16 }}
+                >
+                  Save & Add to Workout
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+        </KeyboardAvoidingView>
       </Modal>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -864,6 +1296,8 @@ type GroupCardProps = {
   onUpdateSet: (id: number, reps: number, weight: number) => void;
   onDeleteSet: (id: number) => void;
   onFinish: () => void;
+  onMoveToTop: () => void;
+  onMoveToBottom: () => void;
 };
 
 function ExerciseGroupCard({
@@ -878,15 +1312,15 @@ function ExerciseGroupCard({
   onUpdateSet,
   onDeleteSet,
   onFinish,
+  onMoveToTop,
+  onMoveToBottom,
 }: GroupCardProps) {
   return (
     <View
       style={[
         styles.groupCard,
         {
-          backgroundColor: hoverIndicator
-            ? Colors.accent + "12"
-            : theme.card,
+          backgroundColor: hoverIndicator ? Colors.accent + "12" : theme.card,
           borderColor: theme.border,
           borderTopColor:
             hoverIndicator === "top" ? Colors.accent : theme.border,
@@ -904,8 +1338,8 @@ function ExerciseGroupCard({
         },
       ]}
     >
-      {/* Exercise header */}
-      <View style={styles.groupHeader}>
+      {/* Top row: drag handle + exercise name/muscle + done button */}
+      <View style={styles.cardTopRow}>
         <TouchableOpacity
           onLongPress={(e) => onDragStart(e.nativeEvent.pageY)}
           delayLongPress={200}
@@ -915,7 +1349,7 @@ function ExerciseGroupCard({
         >
           <Ionicons
             name="reorder-three"
-            size={22}
+            size={24}
             color={isDragging ? Colors.accent : theme.textMuted}
           />
         </TouchableOpacity>
@@ -928,10 +1362,7 @@ function ExerciseGroupCard({
           </Text>
         </View>
         <TouchableOpacity
-          style={[
-            styles.finishExBtn,
-            { backgroundColor: Colors.success + "22" },
-          ]}
+          style={[styles.finishExBtn, { backgroundColor: Colors.success + "22" }]}
           onPress={onFinish}
         >
           <Ionicons
@@ -946,46 +1377,71 @@ function ExerciseGroupCard({
         </TouchableOpacity>
       </View>
 
-      {/* Column headers */}
-      <View style={styles.setHeaderRow}>
-        <Text
-          style={[styles.setHeaderText, { color: theme.textMuted, width: 30 }]}
-        >
-          SET
-        </Text>
-        <Text
-          style={[
-            styles.setHeaderText,
-            { color: theme.textMuted, flex: 1, paddingLeft: 14 },
-          ]}
-        >
-          REPS
-        </Text>
-        <Text
-          style={[
-            styles.setHeaderText,
-            { color: theme.textMuted, flex: 1, paddingLeft: 14 },
-          ]}
-        >
-          {unit.toUpperCase()}
-        </Text>
-        <View style={{ width: 32 }} />
+      {/* Body: move arrows + sets */}
+      <View style={styles.groupCardBody}>
+        <View style={styles.moveButtonsCol}>
+          <TouchableOpacity
+            onPress={onMoveToTop}
+            hitSlop={{ top: 6, bottom: 4, left: 8, right: 8 }}
+            style={styles.moveButton}
+          >
+            <Ionicons name="chevron-up" size={22} color={theme.textMuted} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onMoveToBottom}
+            hitSlop={{ top: 4, bottom: 6, left: 8, right: 8 }}
+            style={styles.moveButton}
+          >
+            <Ionicons name="chevron-down" size={22} color={theme.textMuted} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.groupCardMain}>
+          {/* Column headers */}
+          <View style={styles.setHeaderRow}>
+            <Text
+              style={[
+                styles.setHeaderText,
+                { color: theme.textMuted, width: 30 },
+              ]}
+            >
+              SET
+            </Text>
+            <Text
+              style={[
+                styles.setHeaderText,
+                { color: theme.textMuted, flex: 1, paddingLeft: 8 },
+              ]}
+            >
+              REPS
+            </Text>
+            <Text
+              style={[
+                styles.setHeaderText,
+                { color: theme.textMuted, flex: 1, paddingLeft: 8 },
+              ]}
+            >
+              {unit.toUpperCase()}
+            </Text>
+            <View style={{ width: 32 }} />
+          </View>
+
+          {/* Sets */}
+          {group.sets.map((set) => (
+            <SetRow
+              key={`${set.id}-${unit}`}
+              set={set}
+              theme={theme}
+              styles={styles}
+              unit={unit}
+              onUpdate={onUpdateSet}
+              onDelete={onDeleteSet}
+            />
+          ))}
+
+          {/* Add set button */}
+        </View>
       </View>
-
-      {/* Sets */}
-      {group.sets.map((set) => (
-        <SetRow
-          key={`${set.id}-${unit}`}
-          set={set}
-          theme={theme}
-          styles={styles}
-          unit={unit}
-          onUpdate={onUpdateSet}
-          onDelete={onDeleteSet}
-        />
-      ))}
-
-      {/* Add set button */}
       <TouchableOpacity
         style={[styles.addSetBtn, { borderColor: theme.border }]}
         onPress={onAddSet}
@@ -1084,7 +1540,7 @@ function SetRow({ set, theme, styles, unit, onUpdate, onDelete }: SetRowProps) {
           { backgroundColor: Colors.badgeAccent + "22" },
         ]}
       >
-        <Text style={[styles.setNum, { color: theme.badgeText }]}> 
+        <Text style={[styles.setNum, { color: theme.badgeText }]}>
           {set.set_number}
         </Text>
       </View>
@@ -1161,28 +1617,38 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     finishBtn: { borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8 },
     finishBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
     listContent: { padding: 12, paddingBottom: 80 },
-    muscleHeader: {
-      fontSize: 11,
-      fontWeight: "700",
-      letterSpacing: 0.8,
-      paddingHorizontal: 2,
-      paddingTop: 10,
-      paddingBottom: 4,
-    },
     groupCard: {
       borderRadius: 14,
       padding: 14,
       marginBottom: 14,
       borderWidth: 1,
     },
-    groupHeader: {
+    cardTopRow: {
       flexDirection: "row",
       alignItems: "center",
       marginBottom: 10,
       gap: 8,
     },
+    groupCardBody: {
+      flexDirection: "row",
+      alignItems: "stretch",
+      gap: 8,
+    },
+    groupCardMain: { flex: 1 },
+    moveButtonsCol: {
+      width: 28,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+    },
+    moveButton: {
+      alignItems: "center",
+      justifyContent: "center",
+    },
     dragHandleBtn: {
-      paddingRight: 2,
+      width: 28,
+      alignItems: "center",
+      justifyContent: "center",
     },
     groupName: { fontSize: 17, fontWeight: "700" },
     groupMuscle: { fontSize: 12, marginTop: 2 },
@@ -1208,7 +1674,7 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     },
     setNum: { fontSize: 13, fontWeight: "700" },
     setInput: {
-      flex: 1,
+      flex: 0.9,
       height: 44,
       borderRadius: 8,
       borderWidth: 1,
@@ -1237,9 +1703,10 @@ function makeStyles(theme: (typeof Colors)["light"]) {
       borderWidth: 1.5,
       borderStyle: "dashed",
       borderRadius: 12,
+      marginHorizontal: 28,
       paddingVertical: 14,
-      marginTop: 4,
-      marginBottom: 20,
+      marginTop: 12,
+      marginBottom: 22,
     },
     addExText: { fontSize: 15, fontWeight: "600" },
     emptyState: {
@@ -1250,6 +1717,8 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     emptyStateText: { fontSize: 15, textAlign: "center" },
     // Picker
     pickerContainer: { flex: 1 },
+    chipScroll: { marginHorizontal: 12, marginBottom: 10, maxHeight: 48, flexShrink: 0 },
+    chipRow: { paddingHorizontal: 12, paddingVertical: 6, flexDirection: "row", gap: 8 },
     dragHandle: { alignItems: "center", paddingTop: 10, paddingBottom: 4 },
     dragPill: { width: 36, height: 4, borderRadius: 2 },
     pickerHeader: {
@@ -1277,6 +1746,27 @@ function makeStyles(theme: (typeof Colors)["light"]) {
       borderBottomWidth: StyleSheet.hairlineWidth,
     },
     pickerItemName: { fontSize: 16, fontWeight: "500" },
+    // Create new exercise button in picker
+    createExBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      borderWidth: 1.5,
+      borderStyle: "dashed",
+      borderRadius: 10,
+      paddingVertical: 11,
+      paddingHorizontal: 14,
+      marginBottom: 8,
+    },
+    createExBtnText: { fontSize: 14, fontWeight: "600" },
+    chip: {
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+      borderRadius: 20,
+      borderWidth: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
     // Finish exercise
     finishExBtn: {
       flexDirection: "row",

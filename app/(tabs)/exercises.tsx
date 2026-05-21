@@ -1,3 +1,4 @@
+import { useColorScheme } from "@/components/useColorScheme";
 import Colors from "@/constants/Colors";
 import { MUSCLE_GROUPS } from "@/constants/MuscleGroups";
 import {
@@ -22,7 +23,6 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { useColorScheme } from "@/components/useColorScheme";
 
 function convertWeightDisplay(
   weight: number,
@@ -78,7 +78,7 @@ export default function ExercisesScreen() {
     setFormMuscle(MUSCLE_GROUPS[0]);
     setFormNotes("");
     setFormDefaultWeight("");
-    setFormDefaultUnit("lbs");
+    setFormDefaultUnit(unit);
     setFormDefaultReps("");
     setModalVisible(true);
   }
@@ -89,9 +89,15 @@ export default function ExercisesScreen() {
     setFormMuscle(ex.muscle_group);
     setFormNotes(ex.notes);
     setFormDefaultWeight(
-      ex.default_weight > 0 ? String(ex.default_weight) : "",
+      ex.default_weight > 0
+        ? convertWeightDisplay(
+            ex.default_weight,
+            ex.default_unit || "lbs",
+            unit,
+          )
+        : "",
     );
-    setFormDefaultUnit((ex.default_unit as "lbs" | "kg") || "lbs");
+    setFormDefaultUnit(unit);
     setFormDefaultReps(ex.default_reps > 0 ? String(ex.default_reps) : "");
     setModalVisible(true);
   }
@@ -162,6 +168,8 @@ export default function ExercisesScreen() {
             placeholderTextColor={theme.textMuted}
             value={search}
             onChangeText={setSearch}
+            autoCorrect={false}
+            autoCapitalize="none"
           />
           {search.length > 0 && (
             <TouchableOpacity onPress={() => setSearch("")}>
@@ -238,7 +246,7 @@ export default function ExercisesScreen() {
                   { backgroundColor: Colors.accent + "22" },
                 ]}
               >
-                <Text style={[styles.badgeText, { color: theme.badgeText }]}> 
+                <Text style={[styles.badgeText, { color: theme.badgeText }]}>
                   {item.muscle_group || "Other"}
                 </Text>
               </View>
@@ -314,7 +322,9 @@ export default function ExercisesScreen() {
             style={[styles.modalHeader, { borderBottomColor: theme.border }]}
           >
             <TouchableOpacity onPress={() => setModalVisible(false)}>
-              <Text style={[styles.modalCancel, { color: theme.textSecondary }]}> 
+              <Text
+                style={[styles.modalCancel, { color: theme.textSecondary }]}
+              >
                 Cancel
               </Text>
             </TouchableOpacity>
@@ -325,7 +335,10 @@ export default function ExercisesScreen() {
               <Text
                 style={[
                   styles.modalSave,
-                  { color: theme.textSecondary, opacity: formName.trim() ? 1 : 0.4 },
+                  {
+                    color: theme.textSecondary,
+                    opacity: formName.trim() ? 1 : 0.4,
+                  },
                 ]}
               >
                 Save
@@ -410,75 +423,57 @@ export default function ExercisesScreen() {
               numberOfLines={3}
             />
 
-            <Text style={[styles.label, { color: theme.textSecondary }]}>
-              DEFAULT REPS
-            </Text>
-            <TextInput
-              style={[
-                styles.input,
-                {
-                  backgroundColor: theme.inputBg,
-                  borderColor: theme.border,
-                  color: theme.text,
-                },
-              ]}
-              placeholder="e.g. 10"
-              placeholderTextColor={theme.textMuted}
-              value={formDefaultReps}
-              onChangeText={setFormDefaultReps}
-              keyboardType="number-pad"
-            />
-
-            <Text style={[styles.label, { color: theme.textSecondary }]}>
-              DEFAULT WEIGHT
-            </Text>
-            <View style={{ flexDirection: "row", gap: 10, marginBottom: 20 }}>
-              <TextInput
-                style={[
-                  styles.input,
-                  {
-                    flex: 1,
-                    marginBottom: 0,
-                    backgroundColor: theme.inputBg,
-                    borderColor: theme.border,
-                    color: theme.text,
-                  },
-                ]}
-                placeholder="e.g. 135"
-                placeholderTextColor={theme.textMuted}
-                value={formDefaultWeight}
-                onChangeText={setFormDefaultWeight}
-                keyboardType="decimal-pad"
-              />
+            <View style={{ marginBottom: 20 }}>
               <View
-                style={{ flexDirection: "row", gap: 6, alignItems: "center" }}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "flex-start",
+                  gap: 10,
+                  maxWidth: 400,
+                }}
               >
-                {(["lbs", "kg"] as const).map((u) => (
-                  <TouchableOpacity
-                    key={u}
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.label, { color: theme.textSecondary }]}>
+                    DEFAULT REPS
+                  </Text>
+                  <TextInput
                     style={[
-                      styles.unitBtn,
+                      styles.input,
                       {
-                        backgroundColor:
-                          formDefaultUnit === u ? Colors.accent : theme.inputBg,
-                        borderColor:
-                          formDefaultUnit === u ? Colors.accent : theme.border,
+                        marginBottom: 0,
+                        backgroundColor: theme.inputBg,
+                        borderColor: theme.border,
+                        color: theme.text,
                       },
                     ]}
-                    onPress={() => setFormDefaultUnit(u)}
-                  >
-                    <Text
-                      style={{
-                        color:
-                          formDefaultUnit === u ? "#fff" : theme.textSecondary,
-                        fontWeight: "600",
-                        fontSize: 14,
-                      }}
-                    >
-                      {u}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+                    placeholder="e.g. 10"
+                    placeholderTextColor={theme.textMuted}
+                    value={formDefaultReps}
+                    onChangeText={setFormDefaultReps}
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.label, { color: theme.textSecondary }]}>
+                    DEFAULT WEIGHT ({unit.toUpperCase()})
+                  </Text>
+                  <TextInput
+                    style={[
+                      styles.input,
+                      {
+                        marginBottom: 0,
+                        backgroundColor: theme.inputBg,
+                        borderColor: theme.border,
+                        color: theme.text,
+                      },
+                    ]}
+                    placeholder={`e.g. 135`}
+                    placeholderTextColor={theme.textMuted}
+                    value={formDefaultWeight}
+                    onChangeText={setFormDefaultWeight}
+                    keyboardType="decimal-pad"
+                  />
+                </View>
               </View>
             </View>
           </ScrollView>

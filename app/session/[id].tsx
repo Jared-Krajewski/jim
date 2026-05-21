@@ -5,6 +5,8 @@ import {
   MuscleGroupVolume,
   SessionSet,
   WorkoutSession,
+  createTemplateFromSession,
+  deleteSession,
   getSession,
   getSessionMuscleGroupVolumes,
   getSessionSets,
@@ -15,6 +17,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -87,6 +91,8 @@ export default function SessionDetailScreen() {
   const [groups, setGroups] = useState<ExerciseGroup[]>([]);
   const [muscleVolumes, setMuscleVolumes] = useState<MuscleGroupVolume[]>([]);
   const [loading, setLoading] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [creatingTemplate, setCreatingTemplate] = useState(false);
 
   useEffect(() => {
     const sessionId = Number(id);
@@ -114,11 +120,64 @@ export default function SessionDetailScreen() {
     </TouchableOpacity>
   );
 
+  const sessionId = Number(id);
+
+  function handleDelete() {
+    setMenuOpen(false);
+    Alert.alert(
+      "Delete Session",
+      "Are you sure you want to delete this session? This cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteSession(sessionId);
+            router.back();
+          },
+        },
+      ],
+    );
+  }
+
+  async function handleCreateTemplate() {
+    setMenuOpen(false);
+    setCreatingTemplate(true);
+    try {
+      const templateId = await createTemplateFromSession(sessionId);
+      router.push(`/workout/${templateId}?isNew=1` as any);
+    } catch (e) {
+      console.error(e);
+      Alert.alert("Error", "Could not create template. Please try again.");
+    } finally {
+      setCreatingTemplate(false);
+    }
+  }
+
+  const menuBtn = (
+    <TouchableOpacity
+      onPress={() => setMenuOpen(true)}
+      style={{ paddingHorizontal: 8, paddingVertical: 4 }}
+      disabled={creatingTemplate}
+    >
+      {creatingTemplate ? (
+        <ActivityIndicator size="small" color={theme.tint} />
+      ) : (
+        <Ionicons name="ellipsis-horizontal" size={22} color={theme.tint} />
+      )}
+    </TouchableOpacity>
+  );
+
   if (loading) {
     return (
       <>
         <Stack.Screen
-          options={{ title: "Session Details", headerLeft: () => backBtn }}
+          options={{
+            title: "Session Details",
+            headerLeft: () => backBtn,
+            headerRight: () => menuBtn,
+          }}
         />
         <View
           style={{
@@ -138,7 +197,11 @@ export default function SessionDetailScreen() {
     return (
       <>
         <Stack.Screen
-          options={{ title: "Session Details", headerLeft: () => backBtn }}
+          options={{
+            title: "Session Details",
+            headerLeft: () => backBtn,
+            headerRight: () => menuBtn,
+          }}
         />
         <View
           style={{
@@ -162,8 +225,68 @@ export default function SessionDetailScreen() {
   return (
     <>
       <Stack.Screen
-        options={{ title: "Session Details", headerLeft: () => backBtn }}
+        options={{
+          title: "Session Details",
+          headerLeft: () => backBtn,
+          headerRight: () => menuBtn,
+        }}
       />
+
+      {/* 3-dot dropdown menu */}
+      <Modal
+        transparent
+        animationType="fade"
+        visible={menuOpen}
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <TouchableOpacity
+          style={StyleSheet.absoluteFillObject}
+          activeOpacity={1}
+          onPress={() => setMenuOpen(false)}
+        >
+          <View
+            style={[
+              styles.dropdown,
+              { backgroundColor: theme.card, borderColor: theme.border },
+            ]}
+          >
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={handleCreateTemplate}
+            >
+              <Ionicons
+                name="copy-outline"
+                size={18}
+                color={theme.text}
+                style={{ marginRight: 10 }}
+              />
+              <Text style={[styles.menuItemText, { color: theme.text }]}>
+                Create Template from Session
+              </Text>
+            </TouchableOpacity>
+            <View
+              style={{
+                height: StyleSheet.hairlineWidth,
+                backgroundColor: theme.border,
+              }}
+            />
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={handleDelete}
+            >
+              <Ionicons
+                name="trash-outline"
+                size={18}
+                color={Colors.danger}
+                style={{ marginRight: 10 }}
+              />
+              <Text style={[styles.menuItemText, { color: Colors.danger }]}>
+                Delete Session
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
       <ScrollView
         style={styles.container}
         contentContainerStyle={styles.content}
@@ -199,13 +322,17 @@ export default function SessionDetailScreen() {
           <View
             style={[
               styles.summaryPill,
-              { backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border },
+              {
+                backgroundColor: theme.card,
+                borderWidth: 1,
+                borderColor: theme.border,
+              },
             ]}
           >
-            <Text style={[styles.summaryValue, { color: theme.text }]}> 
+            <Text style={[styles.summaryValue, { color: theme.text }]}>
               {groups.length}
             </Text>
-            <Text style={[styles.summaryLabel, { color: theme.textSecondary }]}> 
+            <Text style={[styles.summaryLabel, { color: theme.textSecondary }]}>
               exercises
             </Text>
           </View>
@@ -242,19 +369,17 @@ export default function SessionDetailScreen() {
         </View>
 
         {/* Muscle heatmap for this workout */}
-        {muscleVolumes.length > 0 && (
-          <View
-            style={[
-              styles.heatmapCard,
-              { backgroundColor: theme.card, borderColor: theme.border },
-            ]}
-          >
-            <Text style={[styles.heatmapTitle, { color: theme.text }]}>
-              Muscles Worked
-            </Text>
-            <MuscleHeatmap muscleVolumes={muscleVolumes} />
-          </View>
-        )}
+        <View
+          style={[
+            styles.heatmapCard,
+            { backgroundColor: theme.card, borderColor: theme.border },
+          ]}
+        >
+          <Text style={[styles.heatmapTitle, { color: theme.text }]}>
+            Muscles Worked
+          </Text>
+          <MuscleHeatmap muscleVolumes={muscleVolumes} />
+        </View>
 
         {/* Exercise groups */}
         {groups.map((group) => {
@@ -443,5 +568,27 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     setCell: { flex: 1, fontSize: 14 },
     prRow: { flexDirection: "row", marginTop: 10 },
     prPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 8 },
+    // Dropdown menu
+    dropdown: {
+      position: "absolute",
+      top: 96,
+      right: 12,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      minWidth: 240,
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.15,
+      shadowRadius: 8,
+      elevation: 8,
+      overflow: "hidden",
+    },
+    menuItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 14,
+      paddingHorizontal: 16,
+    },
+    menuItemText: { fontSize: 15, fontWeight: "500" },
   });
 }
