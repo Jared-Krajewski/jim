@@ -12,6 +12,7 @@ import React, {
   createContext,
   useContext,
   useEffect,
+  useEffectEvent,
   useRef,
   useState,
 } from "react";
@@ -95,8 +96,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
         await setAudioModeAsync({ playsInSilentMode: true });
         if (!active) return;
         playerRef.current = createAudioPlayer(
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          require("../assets/audio/412017__skymary__cat-meow-short.wav"),
+          require("../assets/audio/cat_meow_short.wav"),
         );
       } catch {
         // expo-audio unavailable (e.g. web) — no in-app sound
@@ -113,26 +113,6 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
       if (endActivityTimeoutRef.current) clearTimeout(endActivityTimeoutRef.current);
       playerRef.current?.remove();
     };
-  }, []);
-
-  // ── AppState: sync with Live Activity when returning from background ──────────
-
-  useEffect(() => {
-    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
-      if (
-        appStateRef.current.match(/inactive|background/) &&
-        next === "active"
-      ) {
-        syncWithLiveActivity();
-        // If a dismiss was pending while the app was suspended, re-schedule it
-        // for the remaining delay so it fires accurately after resuming.
-        if (endActivityTimeoutRef.current !== null && !isRunningRef.current) {
-          // timeout still armed — no action needed; JS resumes the timer
-        }
-      }
-      appStateRef.current = next;
-    });
-    return () => sub.remove();
   }, []);
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -168,7 +148,7 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
         body: "Rest complete",
         // Same WAV used for in-app playback — plays on lock screen when the
         // mute switch is off, silent otherwise (no Critical Alerts needed).
-        sound: "412017__skymary__cat-meow-short.wav",
+        sound: "cat_meow_short.wav",
         // timeSensitive breaks through Focus modes without Critical Alerts
         interruptionLevel: "timeSensitive" as "timeSensitive",
       },
@@ -252,6 +232,30 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
     });
   }
 
+  // Effect Event: always calls the latest syncWithLiveActivity without
+  // re-subscribing the AppState listener on every render.
+  const onReturnToForeground = useEffectEvent(() => syncWithLiveActivity());
+
+  // ── AppState: sync with Live Activity when returning from background ──────────
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        next === "active"
+      ) {
+        onReturnToForeground();
+        // If a dismiss was pending while the app was suspended, re-schedule it
+        // for the remaining delay so it fires accurately after resuming.
+        if (endActivityTimeoutRef.current !== null && !isRunningRef.current) {
+          // timeout still armed — no action needed; JS resumes the timer
+        }
+      }
+      appStateRef.current = next;
+    });
+    return () => sub.remove();
+  }, []);
+
   // ── handleTimerDone ────────────────────────────────────────────────────────
   // `silent` = true when the OS notification already played (app was suspended
   //  when the timer expired) or the user stopped it manually.
@@ -302,7 +306,9 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
     isRunningRef.current = false;
   }
 
-  handleDoneRef.current = handleTimerDone;
+  useEffect(() => {
+    handleDoneRef.current = handleTimerDone;
+  });
 
   // ── Public API ────────────────────────────────────────────────────────────────
 

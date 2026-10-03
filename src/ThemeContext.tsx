@@ -43,7 +43,8 @@ export function AppThemeProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const system = useSystemColorScheme() ?? "dark";
+  const system: ColorSchemeName =
+    useSystemColorScheme() === "light" ? "light" : "dark";
   const [colorScheme, setColorSchemeState] = useState<ColorSchemeName>(system);
 
   // Load saved preference once on mount (async because file.text() is async)

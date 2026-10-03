@@ -5,7 +5,7 @@ import {
   Exercise,
   TemplateExercise,
   WorkoutTemplate,
-  addExerciseToTemplate,
+  addExerciseToTemplateAtTop,
   createExercise,
   deleteTemplate,
   getExercises,
@@ -70,7 +70,6 @@ export default function EditTemplateScreen() {
   const [pickerSearch, setPickerSearch] = useState("");
 
   // Create-new-exercise form — rendered inside the picker modal (avoids iOS modal stacking)
-  const [newExVisible, setNewExVisible] = useState(false);
   const [pickerView, setPickerView] = useState<"list" | "create">("list");
   const [newExName, setNewExName] = useState("");
   const [newExMuscle, setNewExMuscle] = useState<string>(MUSCLE_GROUPS[0]);
@@ -100,7 +99,7 @@ export default function EditTemplateScreen() {
   const [draggingIdx, setDraggingIdx] = useState(-1);
   const hoverIdxRef = React.useRef(-1);
   const [hoverIdx, setHoverIdx] = useState(-1);
-  const dragYAnim = React.useRef(new Animated.Value(0)).current;
+  const [dragYAnim] = useState(() => new Animated.Value(0));
   const dragStartAbsY = React.useRef(0);
   const itemRefs = React.useRef<(View | null)[]>([]);
   const itemAbsoluteY = React.useRef<{ y: number; height: number }[]>([]);
@@ -124,7 +123,10 @@ export default function EditTemplateScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
   }
 
-  const panResponder = React.useRef(
+  // PanResponder only stores these handlers; refs are read inside them at
+  // gesture time, not during render.
+  // eslint-disable-next-line react-hooks/refs
+  const [panResponder] = useState(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
@@ -181,20 +183,25 @@ export default function EditTemplateScreen() {
         setHoverIdx(-1);
       },
     }),
-  ).current;
+  );
 
-  const load = useCallback(async () => {
-    const t = await getTemplate(templateId);
-    if (t) {
-      setTemplate(t);
-      setTemplateName(t.name);
-      setTemplateNotes(t.notes);
-    }
-    const exs = await getTemplateExercises(templateId);
-    setTemplateExercises(exs);
-  }, [templateId]);
+  const load = useCallback(
+    () =>
+      Promise.all([
+        getTemplate(templateId),
+        getTemplateExercises(templateId),
+      ]).then(([t, exs]) => {
+        if (t) {
+          setTemplate(t);
+          setTemplateName(t.name);
+          setTemplateNotes(t.notes);
+        }
+        setTemplateExercises(exs);
+      }),
+    [templateId],
+  );
 
-  // We use a small trick — useCallback with empty deps so it runs once on mount
+  // Load on mount and whenever the template id changes
   React.useEffect(() => {
     load();
   }, [load]);
@@ -204,6 +211,18 @@ export default function EditTemplateScreen() {
     if (!trimmed) return;
     await updateTemplate(templateId, trimmed, templateNotes.trim());
     setTemplate((prev) => (prev ? { ...prev, name: trimmed } : null));
+  }
+
+  async function handleCreateTemplate() {
+    if (!templateName.trim()) {
+      Alert.alert(
+        "Name required",
+        "Please give this template a name before saving.",
+      );
+      return;
+    }
+    await saveHeader();
+    router.back();
   }
 
   async function openPicker() {
@@ -216,12 +235,11 @@ export default function EditTemplateScreen() {
   }
 
   async function addExercise(exercise: Exercise) {
-    await addExerciseToTemplate(
+    await addExerciseToTemplateAtTop(
       templateId,
       exercise.id,
       3,
       exercise.default_reps ?? 10,
-      templateExercises.length,
       exercise.default_weight ?? 0,
       (exercise.default_unit as "lbs" | "kg") ?? "lbs",
     );
@@ -249,12 +267,11 @@ export default function EditTemplateScreen() {
       const allExs = await getExercises();
       const newEx = allExs.find((e) => e.id === exId);
       if (newEx) {
-        await addExerciseToTemplate(
+        await addExerciseToTemplateAtTop(
           templateId,
           newEx.id,
           3,
           newEx.default_reps ?? 10,
-          templateExercises.length,
           newEx.default_weight ?? 0,
           (newEx.default_unit as "lbs" | "kg") ?? "lbs",
         );
@@ -350,6 +367,31 @@ export default function EditTemplateScreen() {
                   >
                     <Text style={{ color: Colors.danger, fontSize: 16 }}>
                       Cancel
+                    </Text>
+                  </TouchableOpacity>
+                )
+              : undefined,
+          headerRight:
+            isNew === "1"
+              ? () => (
+                  <TouchableOpacity
+                    onPress={handleCreateTemplate}
+                    style={{
+                      backgroundColor: Colors.accent,
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 8,
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text
+                      style={{
+                        color: "#fff",
+                        fontSize: 15,
+                        fontWeight: "700",
+                      }}
+                    >
+                      Create
                     </Text>
                   </TouchableOpacity>
                 )
@@ -562,17 +604,7 @@ export default function EditTemplateScreen() {
           {isNew === "1" ? (
             <TouchableOpacity
               style={[styles.startBtn, { backgroundColor: Colors.accent }]}
-              onPress={async () => {
-                if (!templateName.trim()) {
-                  Alert.alert(
-                    "Name required",
-                    "Please give this template a name before saving.",
-                  );
-                  return;
-                }
-                await saveHeader();
-                router.back();
-              }}
+              onPress={handleCreateTemplate}
             >
               <Ionicons name="checkmark" size={16} color="#fff" />
               <Text style={styles.startBtnText}>Create Template</Text>
@@ -844,7 +876,9 @@ export default function EditTemplateScreen() {
                   >
                     <Text
                       style={{
-                        color: !pickerMuscleFilter ? "#fff" : theme.textSecondary,
+                        color: !pickerMuscleFilter
+                          ? "#fff"
+                          : theme.textSecondary,
                         fontSize: 13,
                         fontWeight: "600",
                       }}

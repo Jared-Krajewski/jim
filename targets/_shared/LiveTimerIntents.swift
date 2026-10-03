@@ -80,7 +80,7 @@ struct ResetTimerIntent: LiveActivityIntent {
             // Use the same custom sound that plays in-app (only audible when
             // the mute switch is off — no Critical Alerts entitlement needed).
             content.sound = UNNotificationSound(
-                named: UNNotificationSoundName("412017__skymary__cat-meow-short.wav")
+                named: UNNotificationSoundName("cat_meow_short.wav")
             )
             if #available(iOS 15.0, *) {
                 content.interruptionLevel = .timeSensitive

@@ -4,6 +4,7 @@ import Colors from "@/constants/Colors";
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import React from "react";
+import type { ColorValue } from "react-native";
 
 type IoniconsName = React.ComponentProps<typeof Ionicons>["name"];
 
@@ -13,7 +14,7 @@ function TabIcon({
   size = 24,
 }: {
   name: IoniconsName;
-  color: string;
+  color: ColorValue;
   size?: number;
 }) {
   return <Ionicons name={name} size={size} color={color} />;

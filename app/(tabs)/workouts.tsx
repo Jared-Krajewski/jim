@@ -55,7 +55,7 @@ export default function WorkoutsScreen() {
   const [draggingIdx, setDraggingIdx] = useState(-1);
   const hoverIdxRef = useRef(-1);
   const [hoverIdx, setHoverIdx] = useState(-1);
-  const dragYAnim = useRef(new Animated.Value(0)).current;
+  const [dragYAnim] = useState(() => new Animated.Value(0));
   const dragStartAbsY = useRef(0);
   // Layout y & height for each template card (indexed by position in `templates`)
   const itemLayouts = useRef<{ y: number; height: number }[]>([]);
@@ -63,7 +63,10 @@ export default function WorkoutsScreen() {
   const listContainerY = useRef(0);
   const isDraggingRef = useRef(false);
 
-  const panResponder = useRef(
+  // PanResponder only stores these handlers; refs are read inside them at
+  // gesture time, not during render.
+  // eslint-disable-next-line react-hooks/refs
+  const [panResponder] = useState(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
@@ -129,7 +132,7 @@ export default function WorkoutsScreen() {
         setHoverIdx(-1);
       },
     }),
-  ).current;
+  );
 
   const load = useCallback(() => {
     getTemplates().then(setTemplates).catch(console.error);
@@ -247,7 +250,7 @@ export default function WorkoutsScreen() {
         >
           <ScrollView
             contentContainerStyle={styles.list}
-            scrollEnabled={!isDraggingRef.current}
+            scrollEnabled={draggingIdx === -1}
           >
             {/* Ad-hoc quick-start card */}
             <TouchableOpacity

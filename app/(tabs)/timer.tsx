@@ -2,7 +2,7 @@ import Colors from "@/constants/Colors";
 import { useTimer } from "@/src/TimerContext";
 import { useColorScheme } from "@/components/useColorScheme";
 import * as Haptics from "expo-haptics";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Keyboard,
   NativeScrollEvent,
@@ -93,12 +93,13 @@ function NumberWheel({
   // never interrupted by a re-render triggered by the parent.
   // ---------------------------------------------------------------------------
   const scrollRef = useRef<ScrollView>(null);
-  /** Build the initial value array synchronously so the first render has items */
-  const initialArr: number[] = [];
-  for (let v = min; v <= max; v += step) initialArr.push(v);
   /** The full ordered value array – rebuilt only when min/max/step changes */
-  const allValuesRef = useRef<number[]>(initialArr);
-  const initialIdx = closestIdx(initialArr, value);
+  const allValues = useMemo(() => {
+    const arr: number[] = [];
+    for (let v = min; v <= max; v += step) arr.push(v);
+    return arr;
+  }, [min, max, step]);
+  const initialIdx = closestIdx(allValues, value);
   /** Index currently snapped to the centre row */
   const currentIdxRef = useRef(initialIdx);
   /** Prevents duplicate commit from both drag-end and momentum-end events */
@@ -113,18 +114,21 @@ function NumberWheel({
   // the right item highlighted (important when value = 0).
   // ---------------------------------------------------------------------------
   const [highlightIdx, setHighlightIdx] = useState(initialIdx);
+  // Re-centre the highlight when the range changes (adjusted during render
+  // rather than in an effect to avoid an extra render pass).
+  const [highlightValues, setHighlightValues] = useState(allValues);
+  if (highlightValues !== allValues) {
+    setHighlightValues(allValues);
+    setHighlightIdx(initialIdx);
+  }
 
   // ---------------------------------------------------------------------------
   // Build / rebuild the full value list (runs once on mount and if range changes)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    const arr: number[] = [];
-    for (let v = min; v <= max; v += step) arr.push(v);
-    allValuesRef.current = arr;
-    const startIdx = closestIdx(arr, value);
+    const startIdx = closestIdx(allValues, value);
     currentIdxRef.current = startIdx;
     lastHapticIdxRef.current = startIdx;
-    setHighlightIdx(startIdx);
     isProgrammaticRef.current = true;
     // Use a tiny delay so the ScrollView has rendered its children first
     const t1 = setTimeout(() => {
@@ -141,16 +145,15 @@ function NumberWheel({
       clearTimeout(t2);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [min, max, step]);
+  }, [allValues]);
 
   // ---------------------------------------------------------------------------
   // Sync when parent drives a value change (preset, text input).
   // Skip if the list hasn't been built yet (handled above).
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    const arr = allValuesRef.current;
-    if (!arr.length) return;
-    const idx = closestIdx(arr, value);
+    if (!allValues.length) return;
+    const idx = closestIdx(allValues, value);
     if (idx === currentIdxRef.current) return; // already there — nothing to do
     currentIdxRef.current = idx;
     lastHapticIdxRef.current = idx;
@@ -164,8 +167,7 @@ function NumberWheel({
       }, 400);
       return () => clearTimeout(t);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value]);
+  }, [value, allValues]);
 
   // ---------------------------------------------------------------------------
   // Scroll handlers
@@ -185,7 +187,7 @@ function NumberWheel({
   function handleScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
     if (isProgrammaticRef.current) return;
     const idx = Math.round(e.nativeEvent.contentOffset.y / ITEM_HEIGHT);
-    const clamped = clamp(idx, 0, allValuesRef.current.length - 1);
+    const clamped = clamp(idx, 0, allValues.length - 1);
     if (clamped !== lastHapticIdxRef.current) {
       lastHapticIdxRef.current = clamped;
       setHighlightIdx(clamped);
@@ -195,13 +197,12 @@ function NumberWheel({
 
   function commitFromY(y: number) {
     if (isProgrammaticRef.current) return;
-    const arr = allValuesRef.current;
-    const idx = clamp(Math.round(y / ITEM_HEIGHT), 0, arr.length - 1);
+    const idx = clamp(Math.round(y / ITEM_HEIGHT), 0, allValues.length - 1);
     currentIdxRef.current = idx;
     lastHapticIdxRef.current = idx;
     setHighlightIdx(idx);
     // snapToInterval already snapped the scroll position; just fire the callback
-    const newVal = arr[idx];
+    const newVal = allValues[idx];
     if (newVal !== value) onChange(newVal);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
   }
@@ -219,8 +220,6 @@ function NumberWheel({
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
-  const allValues = allValuesRef.current;
-
   return (
     <View style={{ alignItems: "center", flex: 1 }}>
       <Text
@@ -344,10 +343,12 @@ export default function TimerScreen() {
   const [customMins, setCustomMins] = useState(String(selectedMins));
   const [customSecs, setCustomSecs] = useState(String(selectedSecs));
 
-  useEffect(() => {
-    setCustomMins(String(Math.floor(selectedSeconds / 60)));
-    setCustomSecs(String(selectedSeconds % 60));
-  }, [selectedSeconds]);
+  const [syncedSeconds, setSyncedSeconds] = useState(selectedSeconds);
+  if (syncedSeconds !== selectedSeconds) {
+    setSyncedSeconds(selectedSeconds);
+    setCustomMins(String(selectedMins));
+    setCustomSecs(String(selectedSecs));
+  }
 
   // ── SVG ring animation ──────────────────────────────────────────────────────
   // sweepAnim: 0 = full ring  /  1 = empty ring (timer done)
@@ -366,7 +367,7 @@ export default function TimerScreen() {
         easing: Easing.linear,
       });
     }
-  }, [remaining, isRunning, selectedSeconds]);
+  }, [remaining, isRunning, selectedSeconds, sweepAnim]);
 
   const animatedArcProps = useAnimatedProps(() => ({
     strokeDashoffset: CIRCUMFERENCE * sweepAnim.value,
@@ -762,7 +763,7 @@ function makeStyles(theme: (typeof Colors)["light"]) {
     inputSep: { fontSize: 24, fontWeight: "700", marginBottom: 16 },
     // Wheel
     dismissOverlay: {
-      ...StyleSheet.absoluteFillObject,
+      ...StyleSheet.absoluteFill,
       zIndex: 1,
     },
     wheelContainer: { width: "100%", marginBottom: 24, zIndex: 2 },

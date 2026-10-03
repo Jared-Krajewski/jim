@@ -90,13 +90,14 @@ export default function SessionDetailScreen() {
   const [session, setSession] = useState<WorkoutSession | null>(null);
   const [groups, setGroups] = useState<ExerciseGroup[]>([]);
   const [muscleVolumes, setMuscleVolumes] = useState<MuscleGroupVolume[]>([]);
-  const [loading, setLoading] = useState(true);
+  // id of the session whose data has finished loading; anything else = loading
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+  const loading = loadedId !== id;
   const [menuOpen, setMenuOpen] = useState(false);
   const [creatingTemplate, setCreatingTemplate] = useState(false);
 
   useEffect(() => {
     const sessionId = Number(id);
-    setLoading(true);
     Promise.all([
       getSession(sessionId),
       getSessionSets(sessionId),
@@ -108,7 +109,7 @@ export default function SessionDetailScreen() {
         setMuscleVolumes(mvols);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedId(id));
   }, [id]);
 
   const backBtn = (
@@ -218,9 +219,14 @@ export default function SessionDetailScreen() {
   }
 
   const totalSets = groups.reduce((acc, g) => acc + g.sets.length, 0);
-  const totalVolume = groups
-    .flatMap((g) => g.sets)
-    .reduce((acc, s) => acc + s.reps * toDisplay(s.weight), 0);
+  // Sum in stored lbs, then convert once — matches the Progress tab's totals.
+  const totalVolume = Math.round(
+    toDisplay(
+      groups
+        .flatMap((g) => g.sets)
+        .reduce((acc, s) => acc + s.reps * s.weight, 0),
+    ),
+  );
 
   return (
     <>
@@ -240,7 +246,7 @@ export default function SessionDetailScreen() {
         onRequestClose={() => setMenuOpen(false)}
       >
         <TouchableOpacity
-          style={StyleSheet.absoluteFillObject}
+          style={StyleSheet.absoluteFill}
           activeOpacity={1}
           onPress={() => setMenuOpen(false)}
         >
@@ -270,10 +276,7 @@ export default function SessionDetailScreen() {
                 backgroundColor: theme.border,
               }}
             />
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={handleDelete}
-            >
+            <TouchableOpacity style={styles.menuItem} onPress={handleDelete}>
               <Ionicons
                 name="trash-outline"
                 size={18}

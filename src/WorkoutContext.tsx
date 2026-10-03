@@ -1,5 +1,16 @@
-import { completeSession, getInProgressSession } from "@/src/db/database";
-import React, { createContext, useContext, useEffect, useState } from "react";
+import {
+  MAX_WORKOUT_SECONDS,
+  completeSession,
+  getInProgressSession,
+} from "@/src/db/database";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useState,
+} from "react";
+import { AppState, AppStateStatus } from "react-native";
 
 export type ActiveWorkout = {
   sessionId: number;
@@ -35,30 +46,6 @@ export function WorkoutProvider({ children }: { children: React.ReactNode }) {
   );
   const [exerciseOrder, setExerciseOrder] = useState<number[]>([]);
 
-  // On app launch, restore any incomplete session from SQLite so the
-  // In Progress banner appears even after a force-quit / restart.
-  // Sessions older than 2.5 hours are auto-completed to avoid stale data.
-  useEffect(() => {
-    getInProgressSession()
-      .then(async (session) => {
-        if (session) {
-          const elapsedMs = Date.now() - session.started_at * 1000;
-          const maxMs = 2.5 * 60 * 60 * 1000; // 2.5 hours
-          if (elapsedMs >= maxMs) {
-            // Set completed_at to started_at + 2.5 hours (in seconds)
-            const completedAt = session.started_at + Math.floor(2.5 * 60 * 60);
-            await completeSession(session.id, completedAt);
-          } else {
-            setActiveWorkoutState({
-              sessionId: session.id,
-              sessionName: session.name,
-            });
-          }
-        }
-      })
-      .catch(() => {});
-  }, []);
-
   function setActiveWorkout(w: ActiveWorkout | null) {
     if (!w) {
       // Reset session-scoped state when ending a workout
@@ -67,6 +54,49 @@ export function WorkoutProvider({ children }: { children: React.ReactNode }) {
     }
     setActiveWorkoutState(w);
   }
+
+  // On app launch, restore any incomplete session from SQLite so the
+  // In Progress banner appears even after a force-quit / restart.
+  // Sessions past the max duration are auto-completed (completeSession caps
+  // completed_at at started_at + MAX_WORKOUT_SECONDS).
+  const restoreOrAutoEndActiveWorkout = useEffectEvent(() =>
+    getInProgressSession()
+      .catch(() => null)
+      .then(async (session) => {
+        if (!session) return;
+
+        const elapsedSec = Date.now() / 1000 - session.started_at;
+        if (elapsedSec >= MAX_WORKOUT_SECONDS) {
+          await completeSession(session.id).catch(console.error);
+          setActiveWorkout(null);
+        } else {
+          setActiveWorkoutState({
+            sessionId: session.id,
+            sessionName: session.name,
+          });
+        }
+      }),
+  );
+
+  useEffect(() => {
+    restoreOrAutoEndActiveWorkout();
+  }, []);
+
+  // Re-run the same check whenever the app returns to the foreground, so a
+  // workout left running in the background still ends at the max duration.
+  useEffect(() => {
+    const appStateRef = { current: AppState.currentState };
+    const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        next === "active"
+      ) {
+        restoreOrAutoEndActiveWorkout();
+      }
+      appStateRef.current = next;
+    });
+    return () => sub.remove();
+  }, []);
 
   return (
     <WorkoutContext.Provider

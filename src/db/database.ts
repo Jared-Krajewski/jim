@@ -1,13 +1,27 @@
 import * as SQLite from "expo-sqlite";
 
 let db: SQLite.SQLiteDatabase | null = null;
+let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
-  if (!db) {
-    db = await SQLite.openDatabaseAsync("gymapp.db");
-    await initDatabase(db);
+  if (db) return db;
+  // Cache the in-flight open+init promise, not just the resolved db, so
+  // concurrent early callers (e.g. root layout + a context effect both
+  // calling this on mount) await the same open/migration instead of each
+  // opening their own connection and racing initDatabase() against it.
+  if (!dbPromise) {
+    dbPromise = (async () => {
+      const database = await SQLite.openDatabaseAsync("gymapp.db");
+      await initDatabase(database);
+      db = database;
+      return database;
+    })().catch((e) => {
+      // Don't cache a failed open/migration — let the next caller retry.
+      dbPromise = null;
+      throw e;
+    });
   }
-  return db;
+  return dbPromise;
 }
 
 async function initDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
@@ -65,36 +79,95 @@ async function initDatabase(database: SQLite.SQLiteDatabase): Promise<void> {
     );
   `);
 
-  // Migrations — safe to run on existing DBs (errors mean column already exists)
-  const migrations = [
-    `ALTER TABLE exercises ADD COLUMN default_weight REAL NOT NULL DEFAULT 0`,
-    `ALTER TABLE exercises ADD COLUMN default_unit TEXT NOT NULL DEFAULT 'lbs'`,
-    `ALTER TABLE exercises ADD COLUMN default_reps INTEGER NOT NULL DEFAULT 10`,
-    `ALTER TABLE template_exercises ADD COLUMN default_weight REAL NOT NULL DEFAULT 0`,
-    `ALTER TABLE template_exercises ADD COLUMN default_unit TEXT NOT NULL DEFAULT 'lbs'`,
-    `ALTER TABLE workout_templates ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
-  ];
-  for (const sql of migrations) {
-    try {
-      await database.execAsync(sql);
-    } catch {
-      /* column already exists */
-    }
-  }
-
-  // Seed exercises on first launch (user_version 0 → 1).
   const verRow = await database.getFirstAsync<{ user_version: number }>(
     "PRAGMA user_version",
   );
   const version = verRow?.user_version ?? 0;
+
+  // A newer build already migrated this DB (e.g. TestFlight → App Store
+  // downgrade). Leave it alone rather than risk rewriting its data.
+  if (version > SCHEMA_VERSION) return;
+
+  // Snapshot an existing DB before changing it, so a bad migration in an
+  // update can never cost the user their history. Fresh installs (v0) have
+  // nothing to protect.
+  if (version >= 1 && version < SCHEMA_VERSION) {
+    await backupDatabase(database, `pre-v${SCHEMA_VERSION}`);
+  }
+
+  // Columns added after the tables first shipped. Fresh installs already
+  // have them from CREATE TABLE above; older DBs get them added here.
+  await database.withTransactionAsync(async () => {
+    await addColumnIfMissing(database, "exercises", "default_weight", "REAL NOT NULL DEFAULT 0");
+    await addColumnIfMissing(database, "exercises", "default_unit", "TEXT NOT NULL DEFAULT 'lbs'");
+    await addColumnIfMissing(database, "exercises", "default_reps", "INTEGER NOT NULL DEFAULT 10");
+    await addColumnIfMissing(database, "template_exercises", "default_weight", "REAL NOT NULL DEFAULT 0");
+    await addColumnIfMissing(database, "template_exercises", "default_unit", "TEXT NOT NULL DEFAULT 'lbs'");
+    await addColumnIfMissing(database, "workout_templates", "sort_order", "INTEGER NOT NULL DEFAULT 0");
+    await addColumnIfMissing(database, "session_sets", "done_at", "INTEGER");
+  });
+
+  // Versioned data migrations. Each step runs in a transaction together
+  // with its user_version bump, so it either fully applies or not at all.
+  // Only ever append steps here — never edit or reorder shipped ones.
   if (version < 1) {
-    await seedExercisesIfEmpty(database);
-    await database.execAsync("PRAGMA user_version = 1");
+    // Seed exercises on first launch.
+    await database.withTransactionAsync(async () => {
+      await seedExercisesIfEmpty(database);
+      await database.execAsync("PRAGMA user_version = 1");
+    });
+  }
+  if (version < 2) {
+    // Session dates used to be written in UTC, which dated evening workouts
+    // as the next day. Re-derive every date from its start time in local
+    // time (dates are only ever set from the start time at creation).
+    await database.withTransactionAsync(async () => {
+      await database.execAsync(
+        `UPDATE workout_sessions SET date = date(started_at, 'unixepoch', 'localtime');
+         PRAGMA user_version = 2;`,
+      );
+    });
+  }
+}
+
+/** Latest schema version. Bump this when appending a migration step. */
+const SCHEMA_VERSION = 2;
+
+async function addColumnIfMissing(
+  database: SQLite.SQLiteDatabase,
+  table: string,
+  column: string,
+  definition: string,
+): Promise<void> {
+  const cols = await database.getAllAsync<{ name: string }>(
+    `PRAGMA table_info(${table})`,
+  );
+  if (cols.some((c) => c.name === column)) return;
+  await database.execAsync(
+    `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
+  );
+}
+
+/** Writes a consistent copy of the DB next to it (e.g. gymapp.pre-v2.db).
+ *  An existing backup with the same name is kept: it's from an earlier
+ *  attempt at this same migration and is the more pristine copy. */
+async function backupDatabase(
+  database: SQLite.SQLiteDatabase,
+  label: string,
+): Promise<void> {
+  const dbPath = database.databasePath.replace(/^file:\/\//, "");
+  const backupPath = dbPath.replace(/\.db$/, "") + `.${label}.db`;
+  try {
+    await database.runAsync("VACUUM INTO ?", [backupPath]);
+  } catch (e) {
+    // Most likely the backup already exists. Either way, don't block the
+    // app from opening — the migrations themselves are transactional.
+    console.warn("Database backup skipped:", e);
   }
 }
 
 // Module-level exercise seed list
-const SEED_EXERCISES: Array<[string, string]> = [
+const SEED_EXERCISES: [string, string][] = [
   // Chest
   ["Barbell Bench Press", "Chest"],
   ["Dumbbell Bench Press", "Chest"],
@@ -356,14 +429,12 @@ async function seedExercisesIfEmpty(
   );
   if (row && row.n > 0) return;
 
-  await database.withTransactionAsync(async () => {
-    for (const [name, muscle] of SEED_EXERCISES) {
-      await database.runAsync(
-        "INSERT INTO exercises (name, muscle_group, notes) VALUES (?, ?, '')",
-        [name, muscle],
-      );
-    }
-  });
+  for (const [name, muscle] of SEED_EXERCISES) {
+    await database.runAsync(
+      "INSERT INTO exercises (name, muscle_group, notes) VALUES (?, ?, '')",
+      [name, muscle],
+    );
+  }
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -419,6 +490,8 @@ export type SessionSet = {
   reps: number;
   weight: number;
   completed: number;
+  /** Epoch ms when the exercise was marked done; null when not done. */
+  done_at: number | null;
 };
 
 export type ProgressPoint = {
@@ -540,30 +613,29 @@ export async function deleteTemplate(id: number): Promise<void> {
   await database.runAsync("DELETE FROM workout_templates WHERE id = ?", [id]);
 }
 
-export async function addExerciseToTemplate(
+/** Adds an exercise to a template at the top of the list (sort_order 0),
+ *  shifting all existing exercises down by one. */
+export async function addExerciseToTemplateAtTop(
   templateId: number,
   exerciseId: number,
   defaultSets: number,
   defaultReps: number,
-  sortOrder: number,
   defaultWeight = 0,
   defaultUnit = "lbs",
 ): Promise<void> {
   const database = await getDatabase();
-  await database.runAsync(
-    `INSERT INTO template_exercises
-       (template_id, exercise_id, default_sets, default_reps, sort_order, default_weight, default_unit)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      templateId,
-      exerciseId,
-      defaultSets,
-      defaultReps,
-      sortOrder,
-      defaultWeight,
-      defaultUnit,
-    ],
-  );
+  await database.withTransactionAsync(async () => {
+    await database.runAsync(
+      "UPDATE template_exercises SET sort_order = sort_order + 1 WHERE template_id = ?",
+      [templateId],
+    );
+    await database.runAsync(
+      `INSERT INTO template_exercises
+         (template_id, exercise_id, default_sets, default_reps, sort_order, default_weight, default_unit)
+       VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      [templateId, exerciseId, defaultSets, defaultReps, defaultWeight, defaultUnit],
+    );
+  });
 }
 
 export async function updateTemplateExercise(
@@ -627,19 +699,114 @@ export async function createSession(
   return result.lastInsertRowId;
 }
 
-export async function completeSession(id: number, completedAt?: number): Promise<void> {
+/** Workouts are auto-ended at this length, and a session's recorded
+ *  duration never exceeds it. */
+export const MAX_WORKOUT_SECONDS = 2 * 60 * 60;
+
+export async function completeSession(id: number): Promise<void> {
   const database = await getDatabase();
-  if (completedAt !== undefined) {
-    await database.runAsync(
-      "UPDATE workout_sessions SET completed_at = ? WHERE id = ?",
-      [completedAt, id],
-    );
-  } else {
-    await database.runAsync(
-      "UPDATE workout_sessions SET completed_at = strftime('%s', 'now') WHERE id = ?",
-      [id],
-    );
-  }
+  // Cap the end time at the max duration so a workout left running in the
+  // background doesn't record an inflated duration. The completed_at guard
+  // makes this a no-op when another path already ended the session.
+  const result = await database.runAsync(
+    `UPDATE workout_sessions
+     SET completed_at = MIN(CAST(strftime('%s', 'now') AS INTEGER), started_at + ?)
+     WHERE id = ? AND completed_at IS NULL`,
+    [MAX_WORKOUT_SECONDS, id],
+  );
+  if (result.changes === 0) return;
+  await syncTemplateWeightsFromSession(id);
+  await syncTemplateOrderFromSession(id);
+}
+
+/** Pushes each exercise's first-set weight from a finished session back into
+ *  the originating template, so the template tracks your current working
+ *  weight instead of staying pinned to whatever it was when created. */
+async function syncTemplateWeightsFromSession(sessionId: number): Promise<void> {
+  const database = await getDatabase();
+  const session = await database.getFirstAsync<{ template_id: number | null }>(
+    "SELECT template_id FROM workout_sessions WHERE id = ?",
+    [sessionId],
+  );
+  if (!session?.template_id) return;
+  const templateId = session.template_id;
+
+  const exercises = await database.getAllAsync<{ exercise_id: number }>(
+    "SELECT DISTINCT exercise_id FROM session_sets WHERE session_id = ?",
+    [sessionId],
+  );
+
+  await database.withTransactionAsync(async () => {
+    for (const { exercise_id: exerciseId } of exercises) {
+      const firstSet = await database.getFirstAsync<{ weight: number }>(
+        `SELECT weight FROM session_sets
+         WHERE session_id = ? AND exercise_id = ?
+         ORDER BY set_number ASC, id ASC
+         LIMIT 1`,
+        [sessionId, exerciseId],
+      );
+      if (!firstSet) continue;
+      await database.runAsync(
+        "UPDATE template_exercises SET default_weight = ? WHERE template_id = ? AND exercise_id = ?",
+        [firstSet.weight, templateId, exerciseId],
+      );
+    }
+  });
+}
+
+/** Reorders the originating template to match the order exercises were
+ *  marked done in a finished session, so the next run follows how you
+ *  actually did it. Template exercises that weren't marked done keep their
+ *  relative order after the done ones; exercises not on the template are
+ *  ignored. No-op if nothing was marked done. */
+async function syncTemplateOrderFromSession(sessionId: number): Promise<void> {
+  const database = await getDatabase();
+  const session = await database.getFirstAsync<{ template_id: number | null }>(
+    "SELECT template_id FROM workout_sessions WHERE id = ?",
+    [sessionId],
+  );
+  if (!session?.template_id) return;
+  const templateId = session.template_id;
+
+  const doneRows = await database.getAllAsync<{ exercise_id: number }>(
+    `SELECT exercise_id FROM session_sets
+     WHERE session_id = ? AND completed = 1 AND done_at IS NOT NULL
+     GROUP BY exercise_id
+     ORDER BY MIN(done_at) ASC`,
+    [sessionId],
+  );
+  if (doneRows.length === 0) return;
+
+  const existing = await database.getAllAsync<{
+    id: number;
+    exercise_id: number;
+  }>(
+    "SELECT id, exercise_id FROM template_exercises WHERE template_id = ? ORDER BY sort_order ASC",
+    [templateId],
+  );
+  if (existing.length === 0) return;
+
+  const rowIdByExerciseId = new Map(
+    existing.map((e) => [e.exercise_id, e.id]),
+  );
+  const doneOrder = doneRows
+    .map((r) => r.exercise_id)
+    .filter((eid) => rowIdByExerciseId.has(eid));
+  const notDone = existing
+    .map((e) => e.exercise_id)
+    .filter((eid) => !doneOrder.includes(eid));
+  const finalOrder = [...doneOrder, ...notDone];
+
+  await database.withTransactionAsync(async () => {
+    for (let i = 0; i < finalOrder.length; i++) {
+      const rowId = rowIdByExerciseId.get(finalOrder[i]);
+      if (rowId === undefined) continue;
+      await database.runAsync(
+        "UPDATE template_exercises SET sort_order = ? WHERE id = ?",
+        [i, rowId],
+      );
+    }
+  });
 }
 
 export async function deleteSession(id: number): Promise<void> {
@@ -679,6 +846,21 @@ export async function deleteSet(id: number): Promise<void> {
   await database.runAsync("DELETE FROM session_sets WHERE id = ?", [id]);
 }
 
+/** Marks all sets for an exercise within a session as done/not-done. Used to
+ *  persist the "Done" toggle so it survives app restarts, and to record when
+ *  it was marked done (drives the template order on finish). */
+export async function setExerciseSetsCompleted(
+  sessionId: number,
+  exerciseId: number,
+  completed: boolean,
+): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    "UPDATE session_sets SET completed = ?, done_at = ? WHERE session_id = ? AND exercise_id = ?",
+    [completed ? 1 : 0, completed ? Date.now() : null, sessionId, exerciseId],
+  );
+}
+
 // ─── Progress Queries ────────────────────────────────────────────────────────
 
 export async function getExerciseProgress(
@@ -689,13 +871,13 @@ export async function getExerciseProgress(
     `SELECT
        ws.date,
        ws.name as session_name,
-       MAX(ss.weight) as max_weight,
+       COALESCE(MAX(CASE WHEN ss.reps > 0 THEN ss.weight END), 0) as max_weight,
        SUM(ss.reps * ss.weight) as total_volume
      FROM session_sets ss
      JOIN workout_sessions ws ON ws.id = ss.session_id
      WHERE ss.exercise_id = ? AND ws.completed_at IS NOT NULL
      GROUP BY ws.id
-     ORDER BY ws.date ASC`,
+     ORDER BY ws.date ASC, ws.started_at ASC`,
     [exerciseId],
   );
 }
@@ -717,14 +899,14 @@ export async function getMuscleGroupProgress(
     `SELECT
        ws.date,
        ws.name as session_name,
-       MAX(ss.weight) as max_weight,
+       COALESCE(MAX(CASE WHEN ss.reps > 0 THEN ss.weight END), 0) as max_weight,
        SUM(ss.reps * ss.weight) as total_volume
      FROM session_sets ss
      JOIN workout_sessions ws ON ws.id = ss.session_id
      JOIN exercises e ON e.id = ss.exercise_id
      WHERE e.muscle_group = ? AND ws.completed_at IS NOT NULL
      GROUP BY ws.id
-     ORDER BY ws.date ASC`,
+     ORDER BY ws.date ASC, ws.started_at ASC`,
     [muscleGroup],
   );
 }
@@ -736,13 +918,13 @@ export async function getAllVolumeProgress(): Promise<ProgressPoint[]> {
     `SELECT
        ws.date,
        ws.name as session_name,
-       MAX(ss.weight) as max_weight,
+       COALESCE(MAX(CASE WHEN ss.reps > 0 THEN ss.weight END), 0) as max_weight,
        SUM(ss.reps * ss.weight) as total_volume
      FROM session_sets ss
      JOIN workout_sessions ws ON ws.id = ss.session_id
      WHERE ws.completed_at IS NOT NULL
      GROUP BY ws.id
-     ORDER BY ws.date ASC`,
+     ORDER BY ws.date ASC, ws.started_at ASC`,
   );
 }
 
@@ -757,7 +939,7 @@ export async function getWorkoutCalendarDates(
     `SELECT date, COUNT(*) as count
      FROM workout_sessions
      WHERE completed_at IS NOT NULL
-       AND date >= date('now', ? || ' days')
+       AND date >= date('now', 'localtime', ? || ' days')
      GROUP BY date
      ORDER BY date ASC`,
     [`-${days}`],
@@ -857,17 +1039,41 @@ export async function createTemplateFromSession(
   );
   const templateId = result.lastInsertRowId;
 
-  // Get distinct exercises in order of first appearance
-  const exercises = await database.getAllAsync<{ exercise_id: number }>(
+  // Distinct exercises in the session, in order of first appearance
+  const sessionExercises = await database.getAllAsync<{ exercise_id: number }>(
     `SELECT exercise_id FROM session_sets
      WHERE session_id = ?
      GROUP BY exercise_id
      ORDER BY MIN(id) ASC`,
     [sessionId],
   );
+  const sessionExerciseIds = sessionExercises.map((e) => e.exercise_id);
 
-  for (let i = 0; i < exercises.length; i++) {
-    const eid = exercises[i].exercise_id;
+  // Prefer the order of the template this session was started from, so
+  // reordering that happened mid-workout doesn't scramble the saved template.
+  const session = await database.getFirstAsync<{
+    template_id: number | null;
+  }>("SELECT template_id FROM workout_sessions WHERE id = ?", [sessionId]);
+
+  let orderedExerciseIds = sessionExerciseIds;
+  if (session?.template_id) {
+    const originalOrder = await database.getAllAsync<{ exercise_id: number }>(
+      "SELECT exercise_id FROM template_exercises WHERE template_id = ? ORDER BY sort_order ASC",
+      [session.template_id],
+    );
+    const fromTemplate = originalOrder
+      .map((r) => r.exercise_id)
+      .filter((eid) => sessionExerciseIds.includes(eid));
+    // Exercises added mid-workout that weren't in the original template are
+    // appended in the order they were first logged.
+    const extras = sessionExerciseIds.filter(
+      (eid) => !fromTemplate.includes(eid),
+    );
+    orderedExerciseIds = [...fromTemplate, ...extras];
+  }
+
+  for (let i = 0; i < orderedExerciseIds.length; i++) {
+    const eid = orderedExerciseIds[i];
     const sets = await database.getAllAsync<{ reps: number; weight: number }>(
       `SELECT reps, weight FROM session_sets
        WHERE session_id = ? AND exercise_id = ?
@@ -876,9 +1082,11 @@ export async function createTemplateFromSession(
     );
 
     const setCount = sets.length;
-    const lastSet = sets[sets.length - 1];
-    const defaultReps = lastSet?.reps ?? 10;
-    const defaultWeight = lastSet?.weight ?? 0;
+    // Use the first set's weight/reps so the template reflects the working
+    // weight you start an exercise with, not whatever the last set landed on.
+    const firstSet = sets[0];
+    const defaultReps = firstSet?.reps ?? 10;
+    const defaultWeight = firstSet?.weight ?? 0;
 
     await database.runAsync(
       `INSERT INTO template_exercises
@@ -1012,17 +1220,18 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
       );
     }
 
-    // Step 5: Restore sessions.
+    // Step 5: Restore sessions. The date is re-derived from the start time in
+    // local time, since older exports stored UTC dates.
     for (const s of payload.sessions) {
       await database.runAsync(
         `INSERT OR REPLACE INTO workout_sessions
            (id, name, template_id, date, started_at, completed_at, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, date(?, 'unixepoch', 'localtime'), ?, ?, ?)`,
         [
           s.id,
           s.name,
           s.template_id,
-          s.date,
+          s.started_at,
           s.started_at,
           s.completed_at,
           s.notes,
@@ -1035,8 +1244,8 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
       const mappedExerciseId = exerciseIdMap.get(ss.exercise_id) ?? ss.exercise_id;
       await database.runAsync(
         `INSERT OR REPLACE INTO session_sets
-           (id, session_id, exercise_id, set_number, reps, weight, completed)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, session_id, exercise_id, set_number, reps, weight, completed, done_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           ss.id,
           ss.session_id,
@@ -1045,6 +1254,7 @@ export async function importAllData(payload: ExportPayload): Promise<void> {
           ss.reps,
           ss.weight,
           ss.completed,
+          ss.done_at ?? null,
         ],
       );
     }

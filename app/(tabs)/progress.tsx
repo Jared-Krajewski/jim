@@ -14,6 +14,7 @@ import {
   getMuscleGroupProgress,
   getSessionDurations,
 } from "@/src/db/database";
+import { localDateString } from "@/src/dates";
 import { useUnit } from "@/src/UnitContext";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
@@ -53,7 +54,7 @@ export default function ProgressScreen() {
       ? Math.round((lbs / 2.20462) * 10) / 10
       : Math.round(lbs * 10) / 10;
 
-  const [trackMode, setTrackMode] = useState<TrackMode>("exercise");
+  const [trackMode, setTrackMode] = useState<TrackMode>("total");
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [selectedExercise, setSelectedExercise] = useState<Exercise | null>(
     null,
@@ -77,8 +78,10 @@ export default function ProgressScreen() {
     useCallback(() => {
       getExercisesWithData().then((exs) => {
         setExercises(exs);
-        if (!selectedExercise && exs.length > 0) {
-          selectExercise(exs[0]);
+        // Pick a default exercise for when the user switches to the
+        // Exercise tab, but don't force trackMode away from its default.
+        if (exs.length > 0) {
+          setSelectedExercise((prev) => prev ?? exs[0]);
         }
       });
       getAllTimeMuscleGroupVolumes()
@@ -87,7 +90,6 @@ export default function ProgressScreen() {
       getSessionDurations()
         .then(setSessionDurations)
         .catch(() => {});
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []),
   );
 
@@ -99,7 +101,7 @@ export default function ProgressScreen() {
       } else if (trackMode === "total") {
         getAllVolumeProgress().then(setProgress);
       }
-    }, [trackMode, selectedMuscleGroup]),
+    }, [trackMode, selectedMuscleGroup, setProgress]),
   );
 
   async function selectExercise(ex: Exercise) {
@@ -163,10 +165,31 @@ export default function ProgressScreen() {
 
   const chartWidth = SCREEN_WIDTH - 48;
 
-  // Helper to avoid UTC timezone shifting issues from toISOString()
-  function localDateString(date: Date): string {
-    return date.toLocaleDateString("en-CA");
+  // When there are many data points, spacing them evenly across the fixed
+  // chart width squashes the x-axis date labels until they overlap. Below
+  // this threshold we keep the "stretch to fit" behavior; above it we give
+  // each point a comfortable minimum spacing and let the chart scroll
+  // instead, defaulting the scroll position to the newest (rightmost) data.
+  const MIN_POINT_SPACING = 46;
+  function chartLayout(
+    dataLength: number,
+    width: number,
+    initial: number,
+    end: number,
+  ) {
+    if (dataLength <= 1) {
+      return { adjustToWidth: true, spacing: undefined, scrollToEnd: false };
+    }
+    const naturalSpacing = (width - initial - end) / (dataLength - 1);
+    const fits = naturalSpacing >= MIN_POINT_SPACING;
+    return {
+      adjustToWidth: fits,
+      spacing: fits ? undefined : MIN_POINT_SPACING,
+      scrollToEnd: !fits,
+    };
   }
+
+  const mainChartLayout = chartLayout(chartData.length, chartWidth, 12, 24);
 
   function subtractDays(date: Date, days: number): Date {
     const result = new Date(date);
@@ -174,36 +197,42 @@ export default function ProgressScreen() {
     return result;
   }
 
+  // Total minutes trained between two local dates, inclusive.
+  function loadBetween(start: string, end: string): number {
+    return sessionDurations
+      .filter((s) => s.date >= start && s.date <= end)
+      .reduce((sum, d) => sum + d.duration_minutes, 0);
+  }
+
   // ACWR computation
   const now = new Date();
-  const nowStr = localDateString(now);
-  const sixDaysAgo = localDateString(subtractDays(now, 6));
 
   // Acute = total load over last 7 days (today + 6 prior days)
-  const acute7 = sessionDurations.filter(
-    (s) => s.date >= sixDaysAgo && s.date <= nowStr,
+  const acuteLoad = loadBetween(
+    localDateString(subtractDays(now, 6)),
+    localDateString(now),
   );
-  const acuteLoad = acute7.reduce((sum, d) => sum + d.duration_minutes, 0);
 
-  // Chronic = average weekly load over previous 4 weeks
-  // Excludes current rolling acute week
-  const weekTotals = [0, 1, 2, 3].map((weekOffset) => {
-    const start = localDateString(subtractDays(now, (weekOffset + 2) * 7));
-    const end = localDateString(subtractDays(now, (weekOffset + 1) * 7));
-    return sessionDurations
-      .filter((s) => s.date >= start && s.date < end)
-      .reduce((sum, d) => sum + d.duration_minutes, 0);
-  });
+  // Chronic = average weekly load over the 4 weeks before the acute week
+  // (days 7–13, 14–20, 21–27, 28–34 ago).
+  const firstSessionDate = sessionDurations[0]?.date;
+  const chronicWeeks = [0, 1, 2, 3]
+    .map((weekOffset) => ({
+      start: localDateString(subtractDays(now, weekOffset * 7 + 13)),
+      end: localDateString(subtractDays(now, weekOffset * 7 + 7)),
+    }))
+    // Weeks before the user's first session aren't part of their history.
+    // Weeks after it count even when empty, so time off lowers the baseline.
+    .filter((w) => firstSessionDate !== undefined && w.end >= firstSessionDate)
+    .map((w) => loadBetween(w.start, w.end));
 
-  // Only use weeks that actually contain data
-  const validWeeks = weekTotals.filter((w) => w > 0);
   const chronicLoad =
-    validWeeks.length > 0
-      ? validWeeks.reduce((a, b) => a + b, 0) / validWeeks.length
+    chronicWeeks.length > 0
+      ? chronicWeeks.reduce((a, b) => a + b, 0) / chronicWeeks.length
       : 0;
 
-  // Require at least 2 full historical week before showing ACWR
-  const hasEnoughHistory = validWeeks.length > 1;
+  // Require at least 2 historical weeks before showing ACWR
+  const hasEnoughHistory = chronicWeeks.length > 1;
   const acwr =
     hasEnoughHistory && chronicLoad > 0 ? acuteLoad / chronicLoad : null;
 
@@ -258,6 +287,12 @@ export default function ProgressScreen() {
     durationChartData.length > 0
       ? Math.max(...durationChartData.map((d) => d.value))
       : 0;
+  const durationChartLayout = chartLayout(
+    durationChartData.length,
+    chartWidth - 32,
+    12,
+    24,
+  );
   // Human-readable label for the current selection
   const selectionLabel =
     trackMode === "exercise"
@@ -277,9 +312,9 @@ export default function ProgressScreen() {
       >
         {(
           [
-            { key: "exercise", label: "Exercise" },
-            { key: "muscle_group", label: "Muscle" },
             { key: "total", label: "Overall" },
+            { key: "muscle_group", label: "Muscle" },
+            { key: "exercise", label: "Exercise" },
           ] as { key: TrackMode; label: string }[]
         ).map(({ key, label }) => (
           <TouchableOpacity
@@ -494,9 +529,12 @@ export default function ProgressScreen() {
               rulesColor={theme.border}
               rulesType="solid"
               showVerticalLines={false}
-              adjustToWidth
-              endSpacing={35}
-              initialSpacing={5}
+              adjustToWidth={mainChartLayout.adjustToWidth}
+              spacing={mainChartLayout.spacing}
+              scrollToEnd={mainChartLayout.scrollToEnd}
+              scrollAnimation={false}
+              endSpacing={24}
+              initialSpacing={12}
             />
           </View>
 
@@ -580,6 +618,12 @@ export default function ProgressScreen() {
                   showStripOnFocus
                   stripColor={Colors.accent + "44"}
                   focusedDataPointColor={Colors.accent}
+                  adjustToWidth={durationChartLayout.adjustToWidth}
+                  spacing={durationChartLayout.spacing}
+                  scrollToEnd={durationChartLayout.scrollToEnd}
+                  scrollAnimation={false}
+                  endSpacing={24}
+                  initialSpacing={12}
                 />
               </View>
 
@@ -651,7 +695,7 @@ export default function ProgressScreen() {
                         fontWeight: "600",
                       }}
                     >
-                      ACUTE (7d avg)
+                      ACUTE (LAST 7d)
                     </Text>
                     <Text
                       style={{
@@ -660,7 +704,7 @@ export default function ProgressScreen() {
                         color: theme.text,
                       }}
                     >
-                      {acuteLoad.toFixed(1)} min/day
+                      {Math.round(acuteLoad)} min/wk
                     </Text>
                   </View>
                   <View>
@@ -671,7 +715,7 @@ export default function ProgressScreen() {
                         fontWeight: "600",
                       }}
                     >
-                      CHRONIC (28d avg)
+                      CHRONIC (4wk avg)
                     </Text>
                     <Text
                       style={{
@@ -680,7 +724,7 @@ export default function ProgressScreen() {
                         color: theme.text,
                       }}
                     >
-                      {chronicLoad.toFixed(1)} min/day
+                      {Math.round(chronicLoad)} min/wk
                     </Text>
                   </View>
                 </View>

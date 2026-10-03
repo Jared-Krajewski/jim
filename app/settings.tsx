@@ -11,6 +11,7 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   ScrollView,
   StyleSheet,
   Switch,
@@ -321,11 +322,9 @@ export default function SettingsScreen() {
             <TouchableOpacity
               onPress={() => {
                 // Open external privacy policy link
-                try {
-                  // Use Linking from react-native
-                  const Linking = require("react-native").Linking;
-                  Linking.openURL("https://www.jaredkrajewski.com/privacy/jim");
-                } catch {}
+                Linking.openURL(
+                  "https://www.jaredkrajewski.com/privacy/jim",
+                ).catch(() => {});
               }}
               activeOpacity={0.7}
             >

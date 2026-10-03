@@ -34,7 +34,7 @@ module.exports = {
   expo: {
     name: "jim",
     slug: "jim",
-    version: "1.1.0",
+    version: "1.1.1",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
     scheme: "jim",
@@ -49,13 +49,15 @@ module.exports = {
       supportsTablet: false,
       bundleIdentifier: "com.jaredkrajewski.jim",
       appleTeamId: "UQ6CB8CM9T",
-      buildNumber: "10", // Declares that the app uses only standard iOS/HTTPS encryption (exempt).
+      buildNumber: "13",
+      // Declares that the app uses only standard iOS/HTTPS encryption (exempt).
       // This auto-answers the App Store encryption compliance question on upload.
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
       },
     },
     android: {
+      package: "com.jaredkrajewski.jim",
       adaptiveIcon: {
         foregroundImage: "./assets/images/adaptive-icon.png",
         backgroundColor: "#ffffff",
@@ -68,16 +70,22 @@ module.exports = {
       "expo-sqlite",
       "@bacons/apple-targets",
       "./plugins/withLiveTimerModule",
+      "./plugins/withSceneLifecycle",
       [
         "expo-notifications",
         {
-          sounds: ["./assets/audio/412017__skymary__cat-meow-short.wav"],
+          sounds: ["./assets/audio/cat_meow_short.wav"],
         },
       ],
       withStrictXcodeSettings, // <-- Hooking into the build process here
     ],
     experiments: {
       typedRoutes: true,
+    },
+    extra: {
+      eas: {
+        projectId: "4c5060d2-7fde-49a6-8698-d9d470edb65a",
+      },
     },
   },
 };

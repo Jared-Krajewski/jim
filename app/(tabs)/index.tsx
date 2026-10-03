@@ -6,6 +6,7 @@ import {
   getWorkoutCalendarDates,
   WorkoutSession,
 } from "@/src/db/database";
+import { localDateString } from "@/src/dates";
 import { useActiveWorkout } from "@/src/WorkoutContext";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -46,7 +47,7 @@ function ActivityHeatmap({ data, colorScheme, theme }: HeatmapProps) {
   const counts = new Map<string, number>();
   data.forEach((d) => counts.set(d.date, d.count));
 
-  const todayISO = new Date().toISOString().split("T")[0];
+  const todayISO = localDateString();
 
   // Generate the last 52 complete weeks + partial current week
   // Start on the Sunday 364 days ago
@@ -57,10 +58,10 @@ function ActivityHeatmap({ data, colorScheme, theme }: HeatmapProps) {
 
   const weeks: string[][] = [];
   const cur = new Date(start);
-  while (cur.toISOString().split("T")[0] <= todayISO) {
+  while (localDateString(cur) <= todayISO) {
     const week: string[] = [];
     for (let d = 0; d < 7; d++) {
-      week.push(cur.toISOString().split("T")[0]);
+      week.push(localDateString(cur));
       cur.setDate(cur.getDate() + 1);
     }
     weeks.push(week);
@@ -207,7 +208,7 @@ export default function HomeScreen() {
     }, []),
   );
 
-  const todayISO = new Date().toISOString().split("T")[0];
+  const todayISO = localDateString();
 
   const styles = makeStyles(theme);
 

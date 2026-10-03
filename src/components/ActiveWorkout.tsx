@@ -9,6 +9,7 @@ import {
   Exercise,
   SessionSet,
   addSet,
+  MAX_WORKOUT_SECONDS,
   completeSession,
   createExercise,
   createSession,
@@ -19,15 +20,18 @@ import {
   getSessionSets,
   getTemplate,
   getTemplateExercises,
+  setExerciseSetsCompleted,
   updateSet,
+  WorkoutSession,
 } from "@/src/db/database";
+import { localDateString } from "@/src/dates";
 import { useTimer } from "@/src/TimerContext";
 import { useUnit } from "@/src/UnitContext";
 import { useActiveWorkout } from "@/src/WorkoutContext";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -62,13 +66,6 @@ type ExerciseGroup = {
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Constants
-// ──────────────────────────────────────────────────────────────────────────────
-
-/** Workouts longer than this are auto-completed to avoid stale sessions. */
-const MAX_WORKOUT_SECONDS = 2.5 * 60 * 60; // 9 000 seconds
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -101,10 +98,6 @@ function applyOrder(groups: ExerciseGroup[], order: number[]): ExerciseGroup[] {
   }
   for (const g of map.values()) ordered.push(g);
   return ordered;
-}
-
-function todayISO() {
-  return new Date().toISOString().split("T")[0];
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -157,7 +150,7 @@ function WorkoutTimer({ theme }: { theme: (typeof Colors)["light"] }) {
         easing: Easing.linear,
       });
     }
-  }, [remaining, isRunning, selectedSeconds]);
+  }, [remaining, isRunning, selectedSeconds, sweepAnim]);
 
   const animatedArcProps = useAnimatedProps(() => ({
     strokeDashoffset: MINI_CIRC * sweepAnim.value,
@@ -328,7 +321,8 @@ export default function ActiveWorkoutScreen({
   const [sessionName, setSessionName] = useState("");
   const [groups, setGroups] = useState<ExerciseGroup[]>([]);
   const [elapsedSec, setElapsedSec] = useState(0);
-  const startRef = useRef(Date.now());
+  // Set when the session is created/resumed, before the elapsed timer starts
+  const startRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Add-exercise picker state
@@ -363,9 +357,10 @@ export default function ActiveWorkoutScreen({
   const [draggingIdx, setDraggingIdx] = useState(-1);
   const hoverIdxRef = useRef(-1);
   const [hoverIdx, setHoverIdx] = useState(-1);
-  const dragYAnim = useRef(new Animated.Value(0)).current;
+  const [dragYAnim] = useState(() => new Animated.Value(0));
   const dragStartAbsY = useRef(0);
   const itemRefs = useRef<(View | null)[]>([]);
+  const listScrollRef = useRef<ScrollView>(null);
   const itemAbsoluteY = useRef<{ y: number; height: number }[]>([]);
   const isDraggingRef = useRef(false);
 
@@ -394,7 +389,7 @@ export default function ActiveWorkoutScreen({
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
   }
 
-  const panResponder = useRef(
+  const [panResponder] = useState(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onStartShouldSetPanResponderCapture: () => false,
@@ -458,48 +453,16 @@ export default function ActiveWorkoutScreen({
         setHoverIdx(-1);
       },
     }),
-  ).current;
-
-  // Initialize session on mount
-  useEffect(() => {
-    if (resumeSessionId) {
-      resumeSession(resumeSessionId);
-    } else {
-      initSession();
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, []);
-
-  // Auto-end workout after 2.5 hours to prevent forgotten sessions
-  useEffect(() => {
-    if (elapsedSec >= MAX_WORKOUT_SECONDS && sessionId) {
-      (async () => {
-        if (timerRef.current) {
-          clearInterval(timerRef.current);
-          timerRef.current = null;
-        }
-        await completeSession(sessionId);
-        setActiveWorkout(null);
-        router.replace("/(tabs)/workouts");
-      })();
-    }
-  }, [elapsedSec, sessionId]);
+  );
 
   // ── Resume an existing in-progress session ─────────────────────────────────
 
-  async function resumeSession(sid: number) {
-    const session = await getSession(sid);
-    if (!session) {
-      // Session not found (was deleted?) — fall back to a fresh workout.
-      initSession();
-      return;
-    }
+  async function resumeSession(session: WorkoutSession) {
+    const sid = session.id;
     setSessionId(sid);
     setSessionName(session.name);
     setActiveWorkout({ sessionId: sid, sessionName: session.name });
-    await loadSets(sid);
+    await loadSets(sid, true);
     // Restore elapsed time from when the session started.
     const elapsedMs = Date.now() - session.started_at * 1000;
     startRef.current = Date.now() - Math.max(0, elapsedMs);
@@ -514,7 +477,7 @@ export default function ActiveWorkoutScreen({
       const tmpl = await getTemplate(templateId);
       name = tmpl?.name ?? "Workout";
     }
-    const id = await createSession(name, templateId ?? null, todayISO());
+    const id = await createSession(name, templateId ?? null, localDateString());
     setSessionId(id);
     setSessionName(name);
     setActiveWorkout({ sessionId: id, sessionName: name });
@@ -534,7 +497,7 @@ export default function ActiveWorkoutScreen({
         );
       }
     }
-    await loadSets(id);
+    await loadSets(id, true);
 
     // Start timer
     startRef.current = Date.now();
@@ -543,13 +506,67 @@ export default function ActiveWorkoutScreen({
     }, 1000);
   }
 
-  async function loadSets(sid?: number) {
+  async function loadSets(
+    sid?: number,
+    restoreDoneFromDb = false,
+    orderOverride?: number[],
+  ) {
     const id = sid ?? sessionId;
     if (!id) return;
     const sets = await getSessionSets(id);
     const rawGroups = groupSets(sets);
-    setGroups(applyOrder(rawGroups, exerciseOrder));
+    setGroups(applyOrder(rawGroups, orderOverride ?? exerciseOrder));
+
+    // Sync "done" status from persisted data — covers cases where in-memory
+    // context state was lost (app restart, JS reload) after marking done.
+    // Only run this on the initial load: finishExercise/unfinishExercise
+    // persist asynchronously, so re-deriving "done" from the DB on every
+    // loadSets() call (e.g. after adding a set) could race an in-flight
+    // "undo" write and incorrectly re-mark an exercise as finished.
+    if (!restoreDoneFromDb) return;
+    const doneFromDb = rawGroups
+      .filter((g) => g.sets.length > 0 && g.sets.every((s) => s.completed))
+      .map((g) => g.exercise.id);
+    if (doneFromDb.some((eid) => !finishedExerciseIds.has(eid))) {
+      setFinishedExerciseIds((prev) => new Set([...prev, ...doneFromDb]));
+    }
   }
+
+  // Effect Events read the latest props/context without re-running effects.
+  const startSession = useEffectEvent(() =>
+    (resumeSessionId
+      ? getSession(resumeSessionId)
+      : Promise.resolve(null)
+    ).then(
+      // Session not found (was deleted?) — fall back to a fresh workout.
+      (session) => (session ? resumeSession(session) : initSession()),
+    ),
+  );
+
+  const autoEndSession = useEffectEvent(async (sid: number) => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    await completeSession(sid).catch(console.error);
+    setActiveWorkout(null);
+    router.replace("/(tabs)/workouts");
+  });
+
+  // Initialize session on mount
+  useEffect(() => {
+    startSession();
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  // Auto-end workout at the max duration to prevent forgotten sessions
+  useEffect(() => {
+    if (elapsedSec >= MAX_WORKOUT_SECONDS && sessionId) {
+      autoEndSession(sessionId);
+    }
+  }, [elapsedSec, sessionId]);
 
   // ── Set operations ──────────────────────────────────────────────────────────
 
@@ -589,8 +606,26 @@ export default function ActiveWorkoutScreen({
     setPickerVisible(true);
   }
 
+  // Puts a newly-added exercise at the top of the (active) order instead of
+  // wherever applyOrder would otherwise append it. Returns the new order so
+  // callers can pass it straight into loadSets — setExerciseOrder alone
+  // wouldn't be visible yet to a loadSets call made later in the same tick.
+  function moveNewExerciseToFront(exerciseId: number) {
+    const existingOrder =
+      exerciseOrder.length > 0
+        ? exerciseOrder
+        : groups.map((g) => g.exercise.id);
+    const newOrder = [
+      exerciseId,
+      ...existingOrder.filter((id) => id !== exerciseId),
+    ];
+    setExerciseOrder(newOrder);
+    return newOrder;
+  }
+
   async function addExerciseThenSet(exercise: Exercise) {
     if (!sessionId) return;
+    const newOrder = moveNewExerciseToFront(exercise.id);
     await addSet(
       sessionId,
       exercise.id,
@@ -599,7 +634,8 @@ export default function ActiveWorkoutScreen({
       exercise.default_weight ?? 0,
     );
     setPickerVisible(false);
-    await loadSets();
+    await loadSets(undefined, false, newOrder);
+    listScrollRef.current?.scrollTo({ y: 0, animated: true });
   }
 
   async function handleCreateNewExercise() {
@@ -618,7 +654,9 @@ export default function ActiveWorkoutScreen({
         unit,
         parseInt(newExReps, 10) || 10,
       );
+      let newOrder: number[] | undefined;
       if (sessionId) {
+        newOrder = moveNewExerciseToFront(exId);
         await addSet(
           sessionId,
           exId,
@@ -629,7 +667,8 @@ export default function ActiveWorkoutScreen({
       }
       setPickerView("list");
       setPickerVisible(false);
-      await loadSets();
+      await loadSets(undefined, false, newOrder);
+      listScrollRef.current?.scrollTo({ y: 0, animated: true });
       // Refresh the all-exercises list for next time picker opens
       const exs = await getExercises();
       setAllExercises(exs);
@@ -712,6 +751,9 @@ export default function ActiveWorkoutScreen({
 
   function finishExercise(id: number) {
     setFinishedExerciseIds((prev) => new Set([...prev, id]));
+    if (sessionId) {
+      setExerciseSetsCompleted(sessionId, id, true).catch(console.error);
+    }
   }
 
   function unfinishExercise(id: number) {
@@ -720,6 +762,9 @@ export default function ActiveWorkoutScreen({
       next.delete(id);
       return next;
     });
+    if (sessionId) {
+      setExerciseSetsCompleted(sessionId, id, false).catch(console.error);
+    }
   }
 
   // ── Format timer ────────────────────────────────────────────────────────────
@@ -786,6 +831,7 @@ export default function ActiveWorkoutScreen({
       {/* Exercise list with drag-to-reorder */}
       <View style={{ flex: 1 }} {...panResponder.panHandlers}>
         <ScrollView
+          ref={listScrollRef}
           contentContainerStyle={styles.listContent}
           keyboardShouldPersistTaps="handled"
           scrollEnabled={draggingIdx === -1}
